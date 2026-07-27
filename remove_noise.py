@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+#script for detection and sorting of files containing noise vs "active"
+
 """
 remove_noise.py
 ====================
