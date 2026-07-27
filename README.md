@@ -20,7 +20,7 @@ The order these scripts are run:
 
 6: count_active_channels.py
 
-7: generate embeddings (using bacpipe- adjust config and settings files)
+7: generate embeddings (using bacpipe- not included. see github.com/bioacoustic-ai/bacpipe)
 
 8: cluster_embeddings.py
 
