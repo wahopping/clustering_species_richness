@@ -1,4 +1,4 @@
-#script for tabulating species richness from all datasets using the original annotations files
+#script for tabulating species richness from all recordings, sites, datasets etc using the original annotations files
 
 import pandas as pd 
 import os 
