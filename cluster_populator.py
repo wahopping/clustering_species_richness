@@ -1,3 +1,4 @@
+#script for populating site/recording SR spreadsheet with cluster counts
 
 import pandas as pd
 import os
@@ -9,14 +10,14 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. DEFINE FILE PATHS & DIRECTORIES
 # ==========================================
-master_csv_path = '/scratch/hpc/36/hopping/bacpipe_results/clusters/Master_Summary_SR.csv' 
-output_csv = '/storage/hpc/36/hopping/clustering/Master_Summary_SR_with_Clusters.csv'
+master_csv_path = '[root]/bacpipe_results/clusters/Master_Summary_SR.csv' #path to spreadsheet that has the SR values for every recording, site etc, produced with recording_site_sr_generator.py
+output_csv = '[root]/clustering/Master_Summary_SR_with_Clusters.csv'
 
 cluster_dirs = {
-    '/scratch/hpc/36/hopping/bacpipe_results/clusters/fr_not_noise/grid_mappings': '_fr_noise_removed',
-    '/scratch/hpc/36/hopping/bacpipe_results/clusters/br_not_noise/grid_mappings': '_br_noise_removed',
-    '/scratch/hpc/36/hopping/bacpipe_results/clusters/fr_all_channels/grid_mappings': '_fr_all_channels',
-    '/scratch/hpc/36/hopping/bacpipe_results/clusters/br_all_channels/grid_mappings': '_br_all_channels'
+    '[root]/bacpipe_results/clusters/fr_not_noise/grid_mappings': '_fr_noise_removed',
+    '[root]/bacpipe_results/clusters/br_not_noise/grid_mappings': '_br_noise_removed',
+    '[root]/bacpipe_results/clusters/fr_all_channels/grid_mappings': '_fr_all_channels',
+    '[root]/bacpipe_results/clusters/br_all_channels/grid_mappings': '_br_all_channels'
 }
 
 print("Loading Master Summary...")
