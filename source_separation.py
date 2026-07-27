@@ -1,3 +1,5 @@
+#script for running bird_mixit source separation
+
 #!/usr/bin/env python3
 import os
 import glob
