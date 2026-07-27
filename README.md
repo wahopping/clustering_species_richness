@@ -26,7 +26,7 @@ The order these scripts are run:
 
 9: cluster_populator.py
 
-10: perch_hpc_interence.py
+10: perch_classification.py
 
 11: perch_sr_counter.py
 
