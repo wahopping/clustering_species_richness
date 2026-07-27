@@ -1,3 +1,5 @@
+#Script for splitting files into e.g. 15 second, 1 minute, 15 minute etc segments
+
 #!/bin/bash
 
 
