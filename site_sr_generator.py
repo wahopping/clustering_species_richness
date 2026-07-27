@@ -1,3 +1,5 @@
+#script for tabulating species richness from all datasets using the original annotations files
+
 import pandas as pd 
 import os 
 from datetime import datetime, timedelta 
