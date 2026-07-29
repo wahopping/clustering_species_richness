@@ -1,4 +1,5 @@
 #Running Perch v2 (and v1, commented out) for classification
+#filepaths are designated in slurm script where I did this with an array in the HPC
 import os
 import glob
 import argparse
