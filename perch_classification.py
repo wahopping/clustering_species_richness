@@ -1,5 +1,4 @@
-#Running Perch v2 for classification
-
+#Running Perch v2 (and v1, commented out) for classification
 import os
 import glob
 import argparse
@@ -13,26 +12,27 @@ import librosa
 # --- Configuration ---
 SAMPLE_RATE = 32000
 WINDOW_SIZE = 5 * SAMPLE_RATE
-
-# Perch v2 Model URL
 MODEL_URL = 'https://www.kaggle.com/models/google/bird-vocalization-classifier/tensorFlow2/perch_v2/2'
+# MODEL_URL = 'https://www.kaggle.com/models/google/bird-vocalization-classifier/frameworks/tensorFlow2/variations/bird-vocalization-classifier/versions/1' #for perch 1.0
 
-# Perch v1: https://www.kaggle.com/models/google/bird-vocalization-classifier/TensorFlow2/bird-vocalization-classifier/8
+# --- 1. SET THIS TO TRUE FOR YOUR FIRST RUN ---
+CALIBRATION_MODE = False
 
-# Set to True to limit processing to 50 files for debugging/testing
+# When calibrating, we drop raw logits below this number to keep file sizes small 
+# and prevent OOM crashes on the cluster.
+RAW_LOGIT_CUTOFF = 1.0
+
+# --- 2. SET THESE AFTER CALIBRATION, THEN SET CALIBRATION_MODE = FALSE ---
+CALIBRATED_OFFSET = 10.0482     
+CALIBRATED_TEMPERATURE = 0.7346 
+PROBABILITY_CUTOFF = 0.05
+
 TEST_RUN = False
-
-# We keep this for reference, but you can rely on the raw logits moving forward
 CALIBRATION_POWER = 8 
-
-# Drop the "long tail" of ~9,900 species that score near zero to save CSV space.
-LOGIT_CUTOFF = -5.0 
-
-# How many files to process before writing to disk and clearing RAM
-WRITE_BATCH_SIZE = 500 
+WRITE_BATCH_SIZE = 250 # Reduced slightly to ensure we stay well under OOM limits
 
 def setup_gpu_memory():
-    """Prevents TF from pre-allocating 100% of GPU memory, avoiding fragmentation OOMs."""
+    """Prevents TF from pre-allocating 100% of GPU memory."""
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
         try:
@@ -41,10 +41,17 @@ def setup_gpu_memory():
         except RuntimeError as e:
             print(f"GPU memory growth error: {e}")
 
-def safe_sigmoid(x):
-    """Safely applies sigmoid to avoid math overflow warnings."""
-    x = np.clip(x, -100, 100)
-    return 1 / (1 + np.exp(-x))
+# Original Perch 1.0 Sigmoid Function (use when running Perch 1.0)
+# def safe_sigmoid(x):
+#     x = np.clip(x, -100, 100)
+#     return 1 / (1 + np.exp(-x))
+
+def calibrated_sigmoid(x, offset=CALIBRATED_OFFSET, temperature=CALIBRATED_TEMPERATURE):
+    """Applies your customized temperature and offset scaling to Perch v2.0 logits."""
+    # Explicitly cast to float64 to prevent exp overflow warnings
+    scaled_x = (x.astype(np.float64) - offset) / temperature
+    scaled_x = np.clip(scaled_x, -700, 700)
+    return 1 / (1 + np.exp(-scaled_x))
 
 def load_perch_labels():
     """Extracts the official species taxonomy directly from the Kaggle model assets."""
@@ -66,7 +73,7 @@ def load_perch_labels():
         return df.iloc[:, 0].astype(str).str.lower().str.strip().tolist()
 
 def process_audio_file(filepath, model, sci_labels):
-    """Processes audio and extracts all raw logits above the cutoff."""
+    """Processes audio and extracts logits or calibrated probabilities."""
     filename = os.path.basename(filepath)
     recording = filename.replace('.wav', '')
     
@@ -94,31 +101,60 @@ def process_audio_file(filepath, model, sci_labels):
         window_batched = window[np.newaxis, :]
         
         outputs = infer(inputs=tf.constant(window_batched))
-        logits = outputs.get('output_0', list(outputs.values())[0])
         
-        all_window_logits.append(logits.numpy()[0])
+        # --- Dynamically identify the true logits tensor ---
+        # Perch v2 logits have ~14,800 classes, while embeddings only have 1536
+        logits_tensor = None
+        for key, tensor in outputs.items():
+            if tensor.shape[-1] > 2000:
+                logits_tensor = tensor
+                break
+                
+        if logits_tensor is None:
+            raise ValueError(f"Could not find logits in model outputs! Keys found: {list(outputs.keys())}")
             
-    # Take the highest logit for each species across the file
+        all_window_logits.append(logits_tensor.numpy()[0])
+            
     max_logits = np.max(all_window_logits, axis=0)
-    
     file_results = []
-    top_indices = np.where(max_logits > LOGIT_CUTOFF)[0]
     
-    for idx in top_indices:
-        raw_logit = max_logits[idx]
-        species_name = sci_labels[idx] if idx < len(sci_labels) else "unknown"
+    # --- PROCESSING MODES ---
+    if CALIBRATION_MODE:
+        # Save only strong raw logits to keep the calibration files tiny
+        top_indices = np.where(max_logits > RAW_LOGIT_CUTOFF)[0]
         
-        probs = safe_sigmoid(raw_logit)
-        power_calibrated = probs ** CALIBRATION_POWER
+        for idx in top_indices:
+            raw_logit = max_logits[idx]
+            species_name = sci_labels[idx] if idx < len(sci_labels) else "unknown"
+            
+            file_results.append({
+                'recording': recording,
+                'species': species_name,
+                'raw_logit': raw_logit,
+                'calibrated_probability': np.nan, 
+                'power_calibrated': np.nan
+            })
+            
+    else:
+        # Standard Inference Mode
+        calibrated_probs = calibrated_sigmoid(max_logits)
+        top_indices = np.where(calibrated_probs > PROBABILITY_CUTOFF)[0]
         
-        file_results.append({
-            'recording': recording,
-            'species': species_name,
-            'raw_logit': raw_logit,
-            'standard_sigmoid': probs,
-            'power_calibrated': power_calibrated
-        })
+        for idx in top_indices:
+            raw_logit = max_logits[idx]
+            probs = calibrated_probs[idx]
+            species_name = sci_labels[idx] if idx < len(sci_labels) else "unknown"
+            
+            file_results.append({
+                'recording': recording,
+                'species': species_name,
+                'raw_logit': raw_logit,
+                'calibrated_probability': probs,
+                'power_calibrated': probs ** CALIBRATION_POWER
+            })
 
+    # Clear massive arrays from memory immediately
+    del audio, all_window_logits, max_logits, outputs
     return file_results
 
 def main():
@@ -140,10 +176,11 @@ def main():
         audio_files = audio_files[:50]
         
     print(f"Found {len(audio_files)} audio files to process.")
+    if CALIBRATION_MODE:
+        print(f"CALIBRATION MODE ON: Only saving raw logits > {RAW_LOGIT_CUTOFF}")
     
-    # Initialize the output CSV file and write the header
     os.makedirs(os.path.dirname(args.output_csv), exist_ok=True)
-    empty_df = pd.DataFrame(columns=['recording', 'species', 'raw_logit', 'standard_sigmoid', 'power_calibrated'])
+    empty_df = pd.DataFrame(columns=['recording', 'species', 'raw_logit', 'calibrated_probability', 'power_calibrated'])
     empty_df.to_csv(args.output_csv, index=False)
     
     current_batch = []
@@ -153,24 +190,20 @@ def main():
         if res: 
             current_batch.extend(res)
             
-        # Write to disk and clear RAM every WRITE_BATCH_SIZE files
         if count % WRITE_BATCH_SIZE == 0:
             print(f"Processed {count}/{len(audio_files)} files. Writing batch to disk...")
             if current_batch:
                 df = pd.DataFrame(current_batch)
-                # mode='a' appends to the CSV without overwriting
                 df.to_csv(args.output_csv, mode='a', header=False, index=False)
             
-            # Clear the batch from RAM and force garbage collection
             current_batch = []
             gc.collect()
             
-    # Save any remaining files in the final partial batch
     if current_batch:
         df = pd.DataFrame(current_batch)
         df.to_csv(args.output_csv, mode='a', header=False, index=False)
         
-    print(f"Complete. Detailed logits successfully written to {args.output_csv}")
+    print(f"Complete. Results successfully written to {args.output_csv}")
 
 if __name__ == "__main__":
     main()
