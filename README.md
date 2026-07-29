@@ -3,7 +3,7 @@
 
 Scripts used for the analysis pipeline in [name of paper about source separation and clustering estimating species richness]
 
-for now, i don't include the slurm (.sh) files to excute these python scripts in the HPC - doesn't seem necessary. But available upon request
+for now, i don't include the slurm (.sh) files to excute these python scripts in the HPC, as these settings will vary depending on your local cluster. But available upon request
 
 
 The order these scripts are run:
