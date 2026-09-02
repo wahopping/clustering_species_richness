@@ -1,0 +1,2283 @@
+---
+title: "Chapter 1 plots"
+---
+
+
+
+
+Fig 2:
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(ggrepel)
+
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
+output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# We are only using Unsupervised Clusters for this plot
+er_col_cluster <- "hier_euc_t0.7_br_noise_removed"
+
+# Initial scales needed to pull in the raw data
+initial_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Site_Date", "Site")
+# Scales used for final plotting
+plot_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Macro (~1 Hour)")
+base_datasets <- c("PER", "STM_h", "STM_s_HTR", "STM_s_LTR")
+
+theme_mee <- function() {
+  theme_classic(base_size = 12) +
+    theme(
+      axis.text = element_text(color = "black"),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black"),
+      axis.title = element_text(face = "bold", size = 13),
+      plot.title = element_text(face = "bold", size = 16, hjust = 0.5), 
+      legend.title = element_text(face = "bold", size = 13),
+      legend.text = element_text(size = 12),
+      legend.background = element_blank(),
+      legend.key = element_blank(),
+      strip.background = element_rect(fill = "gray95", color = "black", linewidth = 0.5),
+      strip.text = element_text(face = "bold", size = 11),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5)
+    )
+}
+
+# ==========================================
+# 2. DATA PREP & EFFORT CALCULATION
+# ==========================================
+cat("Loading data...\n")
+df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+df_filtered <- df %>%
+  filter(Dataset %in% base_datasets,
+         Summary_Level %in% initial_scales) %>%
+  mutate(Region = ifelse(grepl("PER", Dataset), "PER", "STM")) 
+
+base_effort <- df %>%
+  filter(
+    (Dataset %in% c("PER", "STM_h", "STM_s_HTR") & Summary_Level == "15_Second_Interval") |
+    (Dataset == "STM_s_LTR" & Summary_Level == "15_Minute_Interval")
+  ) %>%
+  mutate(
+    Minute_Value = ifelse(Summary_Level == "15_Second_Interval", 0.25, 15),
+    Target_Site_Date = sub("_[^_]+$", "", Grouping),
+    Target_Site = sub("_[^_]+_[^_]+$", "", Grouping)
+  )
+
+effort_site_date <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site_Date) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site_Date")
+
+effort_site <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site")
+
+effort_combined <- bind_rows(effort_site_date, effort_site)
+
+# Merge efforts, then filter and rename Site/Site_Date
+df_final <- df_filtered %>%
+  left_join(effort_combined, by = c("Dataset", "Summary_Level", "Grouping")) %>%
+  mutate(Effort_Minutes = replace_na(Effort_Minutes, 1)) %>%
+  # Apply filtering rules for the Macro panel
+  filter(
+    Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval") |
+    (Region == "STM" & Summary_Level == "Site") |
+    (Region == "PER" & Summary_Level == "Site_Date")
+  ) %>%
+  mutate(
+    # Combine the remaining Site and Site_Date records into a single level
+    Summary_Level = ifelse(Summary_Level %in% c("Site", "Site_Date"), "Macro (~1 Hour)", Summary_Level)
+  )
+
+# ==========================================
+# 3. PLOT PREPARATION
+# ==========================================
+cat("Preparing plot data...\n")
+
+# Set seed for reproducible jittering
+set.seed(42)
+
+sub_df <- df_final %>%
+  mutate(
+    ER = !!sym(er_col_cluster),
+    
+    # Dynamic Alpha based on density
+    Alpha_Val = case_when(
+      Summary_Level %in% c("Macro (~1 Hour)", "15_Minute_Interval") ~ 0.6,
+      Summary_Level == "1_Minute_Interval" ~ 0.2,
+      TRUE ~ 0.05 # For 15_Second_Interval
+    ),
+    
+    # Selective Jittering: Only scramble the coordinates for the dense 15s/1m scales
+    plot_ER = ifelse(Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval"), 
+                     jitter(ER, amount = 0.4), ER),
+    plot_SR = ifelse(Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval"), 
+                     jitter(SR, amount = 0.4), SR)
+  ) %>%
+  filter(!is.na(SR) & !is.na(ER))
+
+# Lock in the factor order so the facets draw left-to-right
+sub_df$Summary_Level <- factor(sub_df$Summary_Level, levels = plot_scales)
+
+# Calculate Spearman's Rho and P-Values (Using True Data, not Jittered Data)
+stats_df <- sub_df %>%
+  group_by(Region, Summary_Level) %>%
+  group_modify(~ {
+    df_sub <- .x
+    if (nrow(df_sub) < 3) return(data.frame(rho = NA, pval = NA))
+    
+    ct <- cor.test(df_sub$ER, df_sub$SR, method = "spearman", exact = FALSE)
+    
+    p_val <- ct$p.value
+    p_str <- if (p_val < 0.001) "< 0.001" else sprintf("= %.3f", p_val)
+    
+    data.frame(
+      rho = ct$estimate,
+      pval = p_str
+    )
+  }) %>%
+  ungroup() %>%
+  filter(!is.na(rho)) %>%
+  mutate(label = sprintf("\u03c1 = %.3f (p %s)", rho, pval))
+
+# Calculate mathematically consistent coordinates for the floating labels
+label_coords <- sub_df %>%
+  group_by(Summary_Level) %>%
+  summarize(
+    max_x = max(ER, na.rm = TRUE),
+    max_y = max(SR, na.rm = TRUE)
+  )
+
+stats_df <- stats_df %>%
+  left_join(label_coords, by = "Summary_Level") %>%
+  mutate(
+    # Because limits start at 0, multiplying by a percentage guarantees perfect alignment
+    plot_x = max_x * 0.03, # Exactly 3% from the left edge
+    plot_y = ifelse(Region == "PER", max_y * 1.06, max_y * 1.04) # Exact vertical tiering
+  )
+
+# ==========================================
+# 4. GENERATE AND EXPORT PLOT
+# ==========================================
+cat("Building 2x2 grid plot...\n")
+
+p <- ggplot(sub_df) +
+  
+  # --- POINT LAYER 1: 15-Second Scale (All shapes) - Size 1.5 ---
+  geom_point(data = filter(sub_df, Summary_Level == "15_Second_Interval"),
+             aes(x = plot_ER, y = plot_SR, color = Region, shape = Dataset, alpha = Alpha_Val), 
+             size = 1.5) +
+             
+  # --- POINT LAYER 2a: 1-Minute Scale for non-triangle shapes - Size 1.5 ---
+  geom_point(data = filter(sub_df, Summary_Level == "1_Minute_Interval" & Dataset != "STM_s_HTR"),
+             aes(x = plot_ER, y = plot_SR, color = Region, shape = Dataset, alpha = Alpha_Val), 
+             size = 1.5) +
+             
+  # --- POINT LAYER 2b: 1-Minute Scale for STM_s_HTR (Triangles) - Size bumped to 2.5 ---
+  geom_point(data = filter(sub_df, Summary_Level == "1_Minute_Interval" & Dataset == "STM_s_HTR"),
+             aes(x = plot_ER, y = plot_SR, color = Region, shape = Dataset, alpha = Alpha_Val), 
+             size = 2.5) +
+             
+  # --- POINT LAYER 3: 15-Minute Scale (Tripled Size) - Size 4.5 ---
+  geom_point(data = filter(sub_df, Summary_Level == "15_Minute_Interval"),
+             aes(x = plot_ER, y = plot_SR, color = Region, shape = Dataset, alpha = Alpha_Val), 
+             size = 4.5) +
+  
+  # --- POINT LAYER 4: Macro Scales (Fixed Size 4.5 to match 15m scale) ---
+  geom_point(data = filter(sub_df, Summary_Level == "Macro (~1 Hour)"),
+             aes(x = plot_ER, y = plot_SR, color = Region, shape = Dataset, alpha = Alpha_Val),
+             size = 6) +
+  
+  scale_alpha_identity() +
+  
+  # Colors
+  scale_color_manual(name = "Region", values = c("PER" = "green4", "STM" = "darkorange2")) +
+  
+  # Shapes: PER is set to 16 but excluded via `breaks`, dropping it from the legend
+  scale_shape_manual(
+    name = "STM sub-datasets", 
+    values = c("PER" = 16, "STM_h" = 16, "STM_s_HTR" = 17, "STM_s_LTR" = 15),
+    breaks = c("STM_h", "STM_s_HTR", "STM_s_LTR") 
+  ) +
+  
+  # TRENDLINE: Linear model for all Scales (Weights use True Effort_Minutes)
+  geom_smooth(data = filter(sub_df, Summary_Level %in% plot_scales),
+               aes(x = ER, y = SR, color = Region, weight = Effort_Minutes), 
+               method = "lm", formula = y ~ x, se = TRUE, alpha = 0.2, linewidth = 1) +
+               
+  # Floating Stats with White Outline
+  geom_text_repel(data = stats_df, 
+                  aes(x = plot_x, y = plot_y, label = label, color = Region), 
+                  hjust = 0, vjust = 1, direction = "y", 
+                  point.padding = NA, 
+                  bg.color = "white", bg.r = 0.15, 
+                  segment.color = NA, size = 4, fontface = "bold", show.legend = FALSE) +
+  
+  # Faceting: 2 columns x 2 rows creates exactly 4 panels
+  facet_wrap(~ Summary_Level, ncol = 2, nrow = 2, scales = "free", 
+             labeller = as_labeller(function(x) gsub("_", " ", x))) +
+  
+  # Force axes to start at (0,0) exactly
+  scale_x_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.05))) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.15))) + 
+  
+  labs(
+    title = "Unsupervised Clusters: Predictive Performance by Region",
+    x = "Estimated Richness (Unsupervised Clusters)",
+    y = "Observed Richness (SR)"
+  ) +
+  theme_mee() +
+  
+  # Legend Customization and Horizontal Formatting
+  theme(
+    legend.position = "bottom", 
+    legend.box = "horizontal",
+    legend.direction = "horizontal",
+    legend.background = element_blank()
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(alpha = 1, size = 5, shape = 16, fill = NA), order = 1, nrow = 1),
+    shape = guide_legend(override.aes = list(alpha = 1, size = 4, color = "darkorange2"), order = 2, nrow = 1)
+  )
+
+output_path <- paste0(output_dir, "figure2_2.png")
+ggsave(output_path, p, width = 10, height = 9, dpi = 300)
+cat("Done! Saved plot to:", output_path, "\n")
+```
+fig 3 with 2 (loops). think i'm just gonna use the one with 3; if use need to update a couple things.  keeping till we decide 2 or 3.
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro.csv"
+output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+er_col_cluster <- "hier_euc_t0.7_br_noise_removed"
+
+# Initial scales needed to pull the raw data before merging
+initial_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Site_Date", "Site")
+# The actual 4 panels to loop through
+plot_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Macro (~1 Hour)")
+
+base_datasets <- c("PER", "STM_h", "STM_s_HTR", "STM_s_LTR")
+
+# Elegant, High-IF Journal Theme
+theme_mee <- function() {
+  theme_classic(base_size = 12) +
+    theme(
+      axis.text = element_text(color = "black"),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black"),
+      axis.title = element_text(face = "bold", size = 13),
+      plot.title = element_text(face = "bold", size = 16, hjust = 0.5), 
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold", size = 13),
+      legend.text = element_text(size = 12),
+      legend.background = element_blank(),
+      legend.key = element_blank(),
+      strip.background = element_rect(fill = "gray95", color = "black", linewidth = 0.5),
+      strip.text = element_text(face = "bold", size = 11),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5)
+    )
+}
+
+# ==========================================
+# 2. DATA PREP & EFFORT CALCULATION
+# ==========================================
+cat("Loading data...\n")
+df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+df_filtered <- df %>%
+  filter(Dataset %in% base_datasets,
+         Summary_Level %in% initial_scales) %>%
+  mutate(Region = ifelse(grepl("PER", Dataset), "PER", "STM"))
+
+base_effort <- df %>%
+  filter(
+    (Dataset %in% c("PER", "STM_h", "STM_s_HTR") & Summary_Level == "15_Second_Interval") |
+    (Dataset == "STM_s_LTR" & Summary_Level == "15_Minute_Interval")
+  ) %>%
+  mutate(
+    Minute_Value = ifelse(Summary_Level == "15_Second_Interval", 0.25, 15),
+    Target_Site_Date = sub("_[^_]+$", "", Grouping),
+    Target_Site = sub("_[^_]+_[^_]+$", "", Grouping)
+  )
+
+effort_site_date <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site_Date) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site_Date")
+
+effort_site <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site")
+
+effort_combined <- bind_rows(effort_site_date, effort_site)
+
+# Merge efforts, filter for the correct macro scopes, and rename
+df_final <- df_filtered %>%
+  left_join(effort_combined, by = c("Dataset", "Summary_Level", "Grouping")) %>%
+  mutate(Effort_Minutes = replace_na(Effort_Minutes, 1)) %>%
+  filter(
+    Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval") |
+    (Region == "STM" & Summary_Level == "Site") |
+    (Region == "PER" & Summary_Level == "Site_Date")
+  ) %>%
+  mutate(
+    Summary_Level = ifelse(Summary_Level %in% c("Site", "Site_Date"), "Macro (~1 Hour)", Summary_Level)
+  )
+
+# ==========================================
+# 3. STATS FUNCTIONS (Effort-Weighted)
+# ==========================================
+get_r2 <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  val <- summary(mod)$adj.r.squared
+  return(sprintf("%.3f", val))
+}
+
+get_rho <- function(df_sub) {
+  val <- cor(df_sub$ER, df_sub$SR, method = "spearman", use = "complete.obs")
+  return(sprintf("%.3f", val))
+}
+
+get_rmse <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  weighted_rmse <- sqrt(sum(df_sub$Effort_Minutes * residuals(mod)^2) / sum(df_sub$Effort_Minutes))
+  return(sprintf("%.3f", weighted_rmse))
+}
+
+get_mae <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  weighted_mae <- sum(df_sub$Effort_Minutes * abs(residuals(mod))) / sum(df_sub$Effort_Minutes)
+  return(sprintf("%.3f", weighted_mae))
+}
+
+# ==========================================
+# 4. DYNAMIC PLOTTING FUNCTION
+# ==========================================
+create_model_comparison_plot <- function(scale_name, data, er_col_perch, perch_label, show_y_label = TRUE, show_x_label = TRUE) {
+  
+  # Create a named vector dynamically to properly map the selected variables in dplyr::select
+  select_map <- c("SR", "Effort_Minutes", "Unsupervised Hierarchical Clusters" = er_col_cluster)
+  select_map[perch_label] <- er_col_perch
+
+  sub_df <- data %>% 
+    filter(Summary_Level == scale_name) %>%
+    dplyr::select(all_of(select_map)) %>%
+    pivot_longer(cols = c(`Unsupervised Hierarchical Clusters`, all_of(perch_label)), 
+                 names_to = "Model", values_to = "ER") %>%
+    filter(!is.na(SR) & !is.na(ER)) %>%
+    mutate(
+      # Cap visual size at 60 mins to prevent anything artificially ballooning
+      Plot_Effort = ifelse(Effort_Minutes > 60, 60, Effort_Minutes)
+    )
+  
+  if(nrow(sub_df) == 0) return(NULL)
+  
+  stats_df <- sub_df %>%
+    group_by(Model) %>%
+    group_modify(~ {
+      df_sub <- .x
+      if (nrow(df_sub) < 3) return(data.frame(ideal_slope = NA, r2 = NA, rho = NA, rmse = NA, mae = NA))
+      
+      max_x <- max(df_sub$ER, na.rm = TRUE)
+      max_y <- max(df_sub$SR, na.rm = TRUE)
+      
+      data.frame(
+        r2 = get_r2(df_sub),
+        rho = get_rho(df_sub),
+        rmse = get_rmse(df_sub),
+        mae = get_mae(df_sub),
+        ideal_slope = max_y / max_x
+      )
+    }) %>%
+    ungroup() %>%
+    filter(!is.na(r2)) %>%
+    mutate(label = paste0("R\u00b2 = ", r2, "\n\u03c1 = ", rho, "\nRMSE = ", rmse, "\nMAE = ", mae))
+  
+  is_dense <- scale_name %in% c("15_Second_Interval", "1_Minute_Interval")
+  is_macro <- scale_name == "Macro (~1 Hour)"
+  pt_alpha <- ifelse(is_dense, 0.05, 0.6) 
+  
+  p <- ggplot(sub_df, aes(x = ER, y = SR, color = Model))
+  
+  # Using a standard linear model across all scales
+  if (is_macro) {
+    p <- p + geom_point(aes(size = Plot_Effort), alpha = pt_alpha) +
+             scale_size_continuous(name = "Effort (Minutes)", 
+                                   range = c(2, 6), 
+                                   breaks = c(15, 30, 45, 60),
+                                   guide = "none") 
+    smooth_layer <- geom_smooth(aes(weight = Effort_Minutes), method = "lm", formula = y ~ x, se = TRUE, alpha = 0.2, linewidth = 1, show.legend = FALSE)
+  } else {
+    pt_size <- ifelse(is_dense, 1, 2.5)
+    p <- p + geom_point(alpha = pt_alpha, size = pt_size)
+    smooth_layer <- geom_smooth(aes(weight = Effort_Minutes), method = "lm", formula = y ~ x, se = TRUE, alpha = 0.2, linewidth = 1, show.legend = FALSE)
+  }
+  
+  plot_title <- gsub("_", " ", scale_name)
+  y_axis_lab <- if(show_y_label) "Observed Richness (SR)" else NULL
+  x_axis_lab <- if(show_x_label) "Estimated Richness (ER)" else NULL
+  
+  p <- p + 
+    geom_abline(data = stats_df, aes(intercept = 0, slope = ideal_slope), 
+                linetype = "dashed", color = "gray50", linewidth = 0.8, inherit.aes = FALSE) +
+    smooth_layer +
+    geom_label(data = stats_df, 
+               aes(x = Inf, y = -Inf, label = label, color = Model), 
+               hjust = 1.1, vjust = -0.1, 
+               fill = "white", label.size = 0.5, label.padding = unit(0.3, "lines"),
+               size = 3.5, fontface = "bold", lineheight = 0.9, show.legend = FALSE) +
+    facet_wrap(~ Model, ncol = 2, scales = "free_x") + 
+    scale_color_manual(
+      values = setNames(c("#3C5488", "#E64B35"), c("Unsupervised Hierarchical Clusters", perch_label)),
+      labels = setNames(c("Clusters", "Perch"), c("Unsupervised Hierarchical Clusters", perch_label))
+    ) +
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.05))) + 
+    labs(
+      title = plot_title,
+      x = x_axis_lab,
+      y = y_axis_lab
+    ) +
+    theme_mee() +
+    guides(color = guide_legend(override.aes = list(alpha = 1, size = 6, shape = 16, fill = NA)))
+  
+  return(p)
+}
+
+# ==========================================
+# 5. BATCH GENERATE AND EXPORT
+# ==========================================
+cat("Starting batch plot generation...\n")
+
+# Define the variable parameters
+list_types <- c("region", "all")
+thresholds <- c("0.1", "0.3", "0.5", "0.7", "0.9")
+
+for (lt in list_types) {
+  for (th in thresholds) {
+    
+    # Strip the leading 0 for file naming/column selection (e.g., "0.1" -> ".1")
+    th_col_str <- sub("^0", "", th)
+    
+    # Dynamically build variables specific to this combination
+    er_col_perch <- paste0("perchV2>", th_col_str, "_", lt)
+    
+    list_label <- ifelse(lt == "region", "region list", "all species")
+    perch_label <- paste0("Perch conf >", th, " (", list_label, ")")
+    
+    cat(sprintf("\n--- Processing Threshold: %s | List: %s ---\n", th, lt))
+    
+    all_plots_model_split <- list()
+    # Iterate using plot_scales so it loops over the 4 panels
+    for (i in seq_along(plot_scales)) {
+      scale <- plot_scales[i]
+      is_last_row <- (i == length(plot_scales))
+      cat("  > Generating:", scale, "\n")
+      
+      all_plots_model_split[[scale]] <- create_model_comparison_plot(
+                                            scale_name = scale,
+                                            data = df_final,
+                                            er_col_perch = er_col_perch,
+                                            perch_label = perch_label,
+                                            show_y_label = TRUE, 
+                                            show_x_label = is_last_row)
+    }
+    
+    valid_model_plots <- all_plots_model_split[!sapply(all_plots_model_split, is.null)]
+    
+    if (length(valid_model_plots) > 0) {
+      cat("  > Assembling layout...\n")
+      # Adjusted height down from 18 to 15 since we removed a row
+      p_model_grid <- wrap_plots(valid_model_plots, ncol = 1, nrow = length(plot_scales)) +
+        plot_layout(guides = "collect") &
+        theme(legend.position = "bottom")
+      
+      output_path <- paste0(output_dir, "SR_vs_ER_Combined_Only_Model_Split_", lt, "_", th_col_str, ".png")
+      ggsave(output_path, p_model_grid, width = 10, height = 15, dpi = 300)
+      cat("  > Done! Saved to:", output_path, "\n")
+    }
+  }
+}
+
+cat("\nAll 10 combinations generated successfully!\n")
+```
+
+fig 3. versions for main and supplementals (with perch 1.0 and perch 2.0)
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
+output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+er_col_cluster <- "hier_euc_t0.7_br_noise_removed"
+
+# Initial scales needed to pull the raw data before merging
+initial_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Site_Date", "Site")
+# The actual 4 panels to loop through
+plot_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Macro (~1 Hour)")
+
+base_datasets <- c("PER", "STM_h", "STM_s_HTR", "STM_s_LTR")
+
+# Elegant, High-IF Journal Theme
+theme_mee <- function() {
+  theme_classic(base_size = 12) +
+    theme(
+      axis.text = element_text(color = "black"),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black"),
+      axis.title = element_text(face = "bold", size = 13),
+      plot.title = element_text(face = "bold", size = 16, hjust = 0.5), 
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold", size = 13),
+      legend.text = element_text(size = 12),
+      legend.background = element_blank(),
+      legend.key = element_blank(),
+      strip.background = element_rect(fill = "gray95", color = "black", linewidth = 0.5),
+      strip.text = element_text(face = "bold", size = 11),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5)
+    )
+}
+
+# ==========================================
+# 2. DATA PREP & EFFORT CALCULATION
+# ==========================================
+cat("Loading data...\n")
+df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+df_filtered <- df %>%
+  filter(Dataset %in% base_datasets,
+         Summary_Level %in% initial_scales) %>%
+  mutate(Region = ifelse(grepl("PER", Dataset), "PER", "STM"))
+
+base_effort <- df %>%
+  filter(
+    (Dataset %in% c("PER", "STM_h", "STM_s_HTR") & Summary_Level == "15_Second_Interval") |
+    (Dataset == "STM_s_LTR" & Summary_Level == "15_Minute_Interval")
+  ) %>%
+  mutate(
+    Minute_Value = ifelse(Summary_Level == "15_Second_Interval", 0.25, 15),
+    Target_Site_Date = sub("_[^_]+$", "", Grouping),
+    Target_Site = sub("_[^_]+_[^_]+$", "", Grouping)
+  )
+
+effort_site_date <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site_Date) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site_Date")
+
+effort_site <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site")
+
+effort_combined <- bind_rows(effort_site_date, effort_site)
+
+# Merge efforts, filter for the correct scopes, and re-combine into Macro
+df_final <- df_filtered %>%
+  left_join(effort_combined, by = c("Dataset", "Summary_Level", "Grouping")) %>%
+  mutate(Effort_Minutes = replace_na(Effort_Minutes, 1)) %>%
+  filter(
+    Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval") |
+    (Region == "STM" & Summary_Level == "Site") |
+    (Region == "PER" & Summary_Level == "Site_Date")
+  ) %>%
+  mutate(
+    Summary_Level = ifelse(Summary_Level %in% c("Site", "Site_Date"), "Macro (~1 Hour)", Summary_Level)
+  )
+
+# ==========================================
+# 3. STATS FUNCTIONS (Effort-Weighted)
+# ==========================================
+get_r2 <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  val <- summary(mod)$adj.r.squared
+  return(sprintf("%.3f", val))
+}
+
+get_rho <- function(df_sub) {
+  val <- cor(df_sub$ER, df_sub$SR, method = "spearman", use = "complete.obs")
+  return(sprintf("%.3f", val))
+}
+
+get_rmse <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  weighted_rmse <- sqrt(sum(df_sub$Effort_Minutes * residuals(mod)^2) / sum(df_sub$Effort_Minutes))
+  return(sprintf("%.3f", weighted_rmse))
+}
+
+get_mae <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  weighted_mae <- sum(df_sub$Effort_Minutes * abs(residuals(mod))) / sum(df_sub$Effort_Minutes)
+  return(sprintf("%.3f", weighted_mae))
+}
+
+# ==========================================
+# 4. DYNAMIC PLOTTING FUNCTION
+# ==========================================
+create_model_comparison_plot <- function(scale_name, data, er_col_perchV1, er_col_perchV2, perchV1_label, perchV2_label, show_y_label = TRUE, show_x_label = TRUE) {
+  
+  # Create a named vector dynamically to properly map the selected variables in dplyr::select
+  select_map <- c("SR", "Effort_Minutes", "Unsupervised Hierarchical Clusters" = er_col_cluster)
+  select_map[perchV1_label] <- er_col_perchV1
+  select_map[perchV2_label] <- er_col_perchV2
+
+  sub_df <- data %>% 
+    filter(Summary_Level == scale_name) %>%
+    dplyr::select(all_of(select_map)) %>%
+    pivot_longer(cols = c(`Unsupervised Hierarchical Clusters`, all_of(perchV1_label), all_of(perchV2_label)), 
+                 names_to = "Model", values_to = "ER") %>%
+    filter(!is.na(SR) & !is.na(ER)) %>%
+    mutate(
+      # Factor the model column so it always plots as Clusters -> V1 -> V2
+      Model = factor(Model, levels = c("Unsupervised Hierarchical Clusters", perchV1_label, perchV2_label))
+    )
+  
+  if(nrow(sub_df) == 0) return(NULL)
+  
+  stats_df <- sub_df %>%
+    group_by(Model) %>%
+    group_modify(~ {
+      df_sub <- .x
+      if (nrow(df_sub) < 3) return(data.frame(ideal_slope = NA, r2 = NA, rho = NA, rmse = NA, mae = NA))
+      
+      max_x <- max(df_sub$ER, na.rm = TRUE)
+      max_y <- max(df_sub$SR, na.rm = TRUE)
+      
+      data.frame(
+        r2 = get_r2(df_sub),
+        rho = get_rho(df_sub),
+        rmse = get_rmse(df_sub),
+        mae = get_mae(df_sub),
+        ideal_slope = max_y / max_x
+      )
+    }) %>%
+    ungroup() %>%
+    filter(!is.na(r2)) %>%
+    mutate(label = paste0("R\u00b2 = ", r2, "\n\u03c1 = ", rho, "\nRMSE = ", rmse, "\nMAE = ", mae))
+  
+  is_dense <- scale_name %in% c("15_Second_Interval", "1_Minute_Interval")
+  is_macro <- scale_name == "Macro (~1 Hour)"
+  
+  pt_alpha <- ifelse(is_dense, 0.05, 0.6) 
+  pt_size <- ifelse(is_macro, 6, ifelse(is_dense, 1, 2.5))
+  
+  plot_title <- gsub("_", " ", scale_name)
+  y_axis_lab <- if(show_y_label) "Observed Richness (SR)" else NULL
+  x_axis_lab <- if(show_x_label) "Estimated Richness (ER)" else NULL
+  
+  p <- ggplot(sub_df, aes(x = ER, y = SR, color = Model)) +
+    geom_point(alpha = pt_alpha, size = pt_size) +
+    geom_abline(data = stats_df, aes(intercept = 0, slope = ideal_slope), 
+                linetype = "dashed", color = "gray50", linewidth = 0.8, inherit.aes = FALSE) +
+    geom_smooth(aes(weight = Effort_Minutes), method = "lm", formula = y ~ x, se = TRUE, alpha = 0.2, linewidth = 1, show.legend = FALSE) +
+    geom_label(data = stats_df, 
+               aes(x = Inf, y = -Inf, label = label, color = Model), 
+               hjust = 1.1, vjust = -0.1, 
+               fill = "white", label.size = 0.5, label.padding = unit(0.3, "lines"),
+               size = 3.5, fontface = "bold", lineheight = 0.9, show.legend = FALSE) +
+    # Switch to ncol = 3 to fit all three models
+    facet_wrap(~ Model, ncol = 3, scales = "free_x") + 
+    scale_color_manual(
+      values = setNames(c("#3C5488", "#00A087", "#E64B35"), 
+                        c("Unsupervised Hierarchical Clusters", perchV1_label, perchV2_label)),
+      labels = setNames(c("Clusters", "Perch v1.0", "Perch v2.0"), 
+                        c("Unsupervised Hierarchical Clusters", perchV1_label, perchV2_label))
+    ) +
+    
+    # Force axes to start at exactly 0 and use integer-only breaks
+    scale_x_continuous(
+      limits = c(0, NA), 
+      expand = expansion(mult = c(0, 0.05)),
+      breaks = function(x) { b <- pretty(x); b[b %% 1 == 0] }
+    ) + 
+    scale_y_continuous(
+      limits = c(0, NA), 
+      expand = expansion(mult = c(0, 0.15)),
+      breaks = function(x) { b <- pretty(x); b[b %% 1 == 0] }
+    ) +
+    
+    labs(
+      title = plot_title,
+      x = x_axis_lab,
+      y = y_axis_lab
+    ) +
+    theme_mee() +
+    guides(color = guide_legend(override.aes = list(alpha = 1, size = 9, shape = 16, fill = NA)))
+  
+  return(p)
+}
+
+# ==========================================
+# 5. BATCH GENERATE AND EXPORT
+# ==========================================
+cat("Starting batch plot generation...\n")
+
+# Define the variable parameters
+list_types <- c("region", "all")
+thresholds <- c("0.1", "0.3", "0.5", "0.7", "0.9")
+
+for (lt in list_types) {
+  for (th in thresholds) {
+    
+    # Strip the leading 0 for file naming/column selection (e.g., "0.1" -> ".1")
+    th_col_str <- sub("^0", "", th)
+    
+    # Dynamically build variables specific to this combination for BOTH versions
+    er_col_perchV1 <- paste0("perchV1>", th_col_str, "_", lt)
+    er_col_perchV2 <- paste0("perchV2>", th_col_str, "_", lt)
+    
+    list_label <- ifelse(lt == "region", "region list", "all species")
+    perchV1_label <- paste0("Perch v1.0 conf >", th, " (", list_label, ")")
+    perchV2_label <- paste0("Perch v2.0 conf >", th, " (", list_label, ")")
+    
+    cat(sprintf("\n--- Processing Threshold: %s | List: %s ---\n", th, lt))
+    
+    all_plots_model_split <- list()
+    # Iterate using plot_scales so it loops over the 4 panels
+    for (i in seq_along(plot_scales)) {
+      scale <- plot_scales[i]
+      is_last_row <- (i == length(plot_scales))
+      cat("  > Generating:", scale, "\n")
+      
+      all_plots_model_split[[scale]] <- create_model_comparison_plot(
+                                                  scale_name = scale,
+                                                  data = df_final,
+                                                  er_col_perchV1 = er_col_perchV1,
+                                                  er_col_perchV2 = er_col_perchV2,
+                                                  perchV1_label = perchV1_label,
+                                                  perchV2_label = perchV2_label,
+                                                  show_y_label = TRUE, 
+                                                  show_x_label = is_last_row)
+    }
+    
+    valid_model_plots <- all_plots_model_split[!sapply(all_plots_model_split, is.null)]
+    
+    if (length(valid_model_plots) > 0) {
+      cat("  > Assembling layout...\n")
+      
+      p_model_grid <- wrap_plots(valid_model_plots, ncol = 1, nrow = length(plot_scales)) +
+        plot_layout(guides = "collect") &
+        theme(legend.position = "bottom")
+      
+      output_path <- paste0(output_dir, "SR_vs_ER_Combined_Only_Model_Split_", lt, "_", th_col_str, "_v1_v2_2.png")
+      
+      # Height is set to 15 to fit the 4 rows
+      ggsave(output_path, p_model_grid, width = 14, height = 15, dpi = 300)
+      cat("  > Done! Saved to:", output_path, "\n")
+    }
+  }
+}
+
+cat("\nAll 10 combinations generated successfully!\n")
+```
+
+Table 1:
+```{r}
+library(dplyr)
+library(tidyr)
+library(gt)
+
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+#input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_br_3.csv"
+input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
+output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+initial_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Site_Date", "Site")
+ordered_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Macro")
+base_datasets <- c("PER", "STM_h", "STM_s_HTR", "STM_s_LTR")
+
+model_mapping <- c(
+  "perchV2>.1_all" = "Perch v2.0, > 0.1, all species",
+  "perchV2>.3_all" = "Perch v2.0, > 0.3, all species",
+  "perchV2>.5_all" = "Perch v2.0, > 0.5, all species",
+  "perchV2>.7_all" = "Perch v2.0, > 0.7, all species",
+  "perchV2>.9_all" = "Perch v2.0, > 0.9, all species",
+  "perchV2>.1_region" = "Perch v2.0, > 0.1, region list",
+  "perchV2>.3_region" = "Perch v2.0, > 0.3, region list",
+  "perchV2>.5_region" = "Perch v2.0, > 0.5, region list",
+  "perchV2>.7_region" = "Perch v2.0, > 0.7, region list",
+  "perchV2>.9_region" = "Perch v2.0, > 0.9, region list",
+  "hier_euc_t0.7_br_noise_removed" = "Unsupervised Clustering"
+)
+
+# ==========================================
+# 2. DATA PREP & EFFORT CALCULATION
+# ==========================================
+cat("Loading data...\n")
+df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+# --- ADD THIS LINE ---
+# This forces all your model columns to be numeric, turning text NAs into real NAs
+df <- df %>%
+  mutate(across(any_of(names(model_mapping)), ~as.numeric(na_if(as.character(.), ""))))
+
+df_filtered <- df %>%
+  filter(Dataset %in% base_datasets,
+         Summary_Level %in% initial_scales) %>%
+  mutate(Region = ifelse(grepl("PER", Dataset), "PER", "STM"))
+
+base_effort <- df %>%
+  filter(
+    (Dataset %in% c("PER", "STM_h", "STM_s_HTR") & Summary_Level == "15_Second_Interval") |
+    (Dataset == "STM_s_LTR" & Summary_Level == "15_Minute_Interval")
+  ) %>%
+  mutate(
+    Minute_Value = ifelse(Summary_Level == "15_Second_Interval", 0.25, 15),
+    Target_Site_Date = sub("_[^_]+$", "", Grouping),
+    Target_Site = sub("_[^_]+_[^_]+$", "", Grouping)
+  )
+
+effort_site_date <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site_Date) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site_Date")
+
+effort_site <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site")
+
+effort_combined <- bind_rows(effort_site_date, effort_site)
+
+# Merge efforts, filter for the correct macro scopes, and rename to "Macro"
+df_final <- df_filtered %>%
+  left_join(effort_combined, by = c("Dataset", "Summary_Level", "Grouping")) %>%
+  mutate(Effort_Minutes = replace_na(Effort_Minutes, 1)) %>%
+  filter(
+    Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval") |
+    (Region == "STM" & Summary_Level == "Site") |
+    (Region == "PER" & Summary_Level == "Site_Date")
+  ) %>%
+  mutate(
+    Summary_Level = ifelse(Summary_Level %in% c("Site", "Site_Date"), "Macro", Summary_Level)
+  )
+
+# ==========================================
+# 3. STATS FUNCTIONS (Returning Numerics)
+# ==========================================
+get_r2 <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  return(summary(mod)$adj.r.squared)
+}
+
+get_rho <- function(df_sub) {
+  return(cor(df_sub$ER, df_sub$SR, method = "spearman", use = "complete.obs"))
+}
+
+get_rmse <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  return(sqrt(sum(df_sub$Effort_Minutes * residuals(mod)^2) / sum(df_sub$Effort_Minutes)))
+}
+
+get_mae <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  return(sum(df_sub$Effort_Minutes * abs(residuals(mod))) / sum(df_sub$Effort_Minutes))
+}
+
+# ==========================================
+# 4. CALCULATE METRICS & RESHAPE DATA
+# ==========================================
+cat("Calculating metrics...\n")
+
+stats_df <- df_final %>%
+  pivot_longer(cols = any_of(names(model_mapping)), 
+               names_to = "Raw_Model", 
+               values_to = "ER") %>%
+  filter(!is.na(SR) & !is.na(ER)) %>%
+  mutate(
+    Model_Label = model_mapping[Raw_Model],
+    Summary_Level = factor(Summary_Level, levels = ordered_scales)
+  ) %>%
+  group_by(Model_Label, Summary_Level) %>%
+  summarize(
+    R2 = get_r2(cur_data()),
+   #Rho = get_rho(cur_data()),
+    RMSE = get_rmse(cur_data()),
+    MAE = get_mae(cur_data()),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = Summary_Level,
+    values_from = c(R2, 
+                    #Rho, 
+                    RMSE, MAE),
+    names_glue = "{Summary_Level}_{.value}"
+  ) %>%
+  relocate(
+    Model_Label,
+    starts_with("15_Second_Interval"),
+    starts_with("1_Minute_Interval"),
+    starts_with("15_Minute_Interval"),
+    starts_with("Macro")
+  ) %>%
+  arrange(factor(Model_Label, levels = unname(model_mapping)))
+
+# ==========================================
+# 5. GENERATE NESTED JOURNAL TABLE
+# ==========================================
+cat("Generating journal-ready table...\n")
+
+pub_table <- stats_df %>%
+  gt() %>%
+  # --- SPANNERS ---
+  tab_spanner(label = md("**15-Second Interval**"), columns = starts_with("15_Second_Interval_")) %>%
+  tab_spanner(label = md("**1-Minute Interval**"), columns = starts_with("1_Minute_Interval_")) %>%
+  tab_spanner(label = md("**15-Minute Interval**"), columns = starts_with("15_Minute_Interval_")) %>%
+  tab_spanner(label = md("**Macro (~1 Hour)**"), columns = starts_with("Macro_")) %>%
+  
+  # --- LABELS & FORMATTING ---
+  cols_label(
+    Model_Label = "Model Configuration",
+    ends_with("_R2") ~ md("*R*<sup>2</sup>"),
+    #ends_with("_Rho") ~ md("&rho;"),
+    ends_with("_RMSE") ~ "RMSE",
+    ends_with("_MAE") ~ "MAE"
+  ) %>%
+  fmt_number(columns = -Model_Label, decimals = 3) %>%
+  
+  # --- STYLING ---
+  tab_options(
+    table.border.top.color = "black", table.border.top.width = px(2),
+    table.border.bottom.color = "black", table.border.bottom.width = px(2),
+    heading.border.bottom.color = "black", heading.border.bottom.width = px(1),
+    column_labels.border.top.color = "black", column_labels.border.top.width = px(1),
+    column_labels.border.bottom.color = "black", column_labels.border.bottom.width = px(1),
+    table_body.border.bottom.color = "black", table_body.hlines.style = "none"
+  ) %>%
+  cols_align(align = "left", columns = Model_Label) %>%
+  cols_align(align = "center", columns = -Model_Label) %>%
+  tab_style(style = cell_fill(color = "#F5F5F5"), locations = cells_body(rows = Model_Label == "Unsupervised Clustering")) %>%
+  tab_style(style = list(cell_text(align = "center")), locations = cells_column_spanners()) %>%
+  
+  # --- DASHED VERTICAL SEPARATORS ---
+  tab_style(
+    style = cell_borders(
+      sides = "left", 
+      color = "gray70", 
+      style = "dashed", 
+      weight = px(1)
+    ),
+    locations = list(
+      cells_body(columns = c(`1_Minute_Interval_R2`, `15_Minute_Interval_R2`, Macro_R2)),
+      cells_column_labels(columns = c(`1_Minute_Interval_R2`, `15_Minute_Interval_R2`, Macro_R2))
+    )
+  ) %>%
+
+  # --- FOOTNOTE ---
+  tab_source_note(
+    source_note = md("Note: The top-performing models in each column are indicated by **bold** (1st), <u>underline</u> (2nd), and *italic* (3rd).")
+  )
+
+# --- DYNAMIC TYPOGRAPHY FOR TOP 3 RANKS ---
+apply_top_3_styling <- function(table_obj, col_name, ranks) {
+  table_obj %>%
+    tab_style(style = cell_text(weight = "bold"), locations = cells_body(columns = all_of(col_name), rows = ranks == 1)) %>%
+    tab_style(style = cell_text(style = "italic"), locations = cells_body(columns = all_of(col_name), rows = ranks == 3)) %>%
+    tab_style(style = cell_text(decorate = "underline"), locations = cells_body(columns = all_of(col_name), rows = ranks == 2))
+}
+
+max_cols <- grep("_R2$|_Rho$", names(stats_df), value = TRUE)
+for (col in max_cols) {
+  col_ranks <- rank(-stats_df[[col]], na.last = "keep", ties.method = "min")
+  pub_table <- apply_top_3_styling(pub_table, col, col_ranks)
+}
+
+min_cols <- grep("_RMSE$|_MAE$", names(stats_df), value = TRUE)
+for (col in min_cols) {
+  col_ranks <- rank(stats_df[[col]], na.last = "keep", ties.method = "min")
+  pub_table <- apply_top_3_styling(pub_table, col, col_ranks)
+}
+
+# ==========================================
+# 6. EXPORT
+# ==========================================
+gtsave(pub_table, paste0(output_dir, "Model_Performance_Summary_Table2_norho.html"))
+gtsave(pub_table, paste0(output_dir, "Model_Performance_Summary_Table2_norho.docx"))
+
+cat("Done! Table saved to:", output_dir, "as HTML and Word document (.docx)\n")
+```
+
+table 1 with perch 1 and 2: (likely update to just be perch for supplementals tho doesnt matter too much)
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(gt)
+
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+input_file <-"/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
+output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+initial_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Site_Date", "Site")
+ordered_scales <- c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval", "Macro")
+base_datasets <- c("PER", "STM_h", "STM_s_HTR", "STM_s_LTR")
+
+# Expanded to include Perch V1, Perch V2, and Clustering
+model_mapping <- c(
+  "hier_euc_t0.7_br_noise_removed" = "Unsupervised Clustering",
+  
+  "perchV1>.1_all" = "Perch v1.0, > 0.1, all species",
+  "perchV1>.3_all" = "Perch v1.0, > 0.3, all species",
+  "perchV1>.5_all" = "Perch v1.0, > 0.5, all species",
+  "perchV1>.7_all" = "Perch v1.0, > 0.7, all species",
+  "perchV1>.9_all" = "Perch v1.0, > 0.9, all species",
+  "perchV1>.1_region" = "Perch v1.0, > 0.1, region list",
+  "perchV1>.3_region" = "Perch v1.0, > 0.3, region list",
+  "perchV1>.5_region" = "Perch v1.0, > 0.5, region list",
+  "perchV1>.7_region" = "Perch v1.0, > 0.7, region list",
+  "perchV1>.9_region" = "Perch v1.0, > 0.9, region list",
+  
+  "perchV2>.1_all" = "Perch v2.0, > 0.1, all species",
+  "perchV2>.3_all" = "Perch v2.0, > 0.3, all species",
+  "perchV2>.5_all" = "Perch v2.0, > 0.5, all species",
+  "perchV2>.7_all" = "Perch v2.0, > 0.7, all species",
+  "perchV2>.9_all" = "Perch v2.0, > 0.9, all species",
+  "perchV2>.1_region" = "Perch v2.0, > 0.1, region list",
+  "perchV2>.3_region" = "Perch v2.0, > 0.3, region list",
+  "perchV2>.5_region" = "Perch v2.0, > 0.5, region list",
+  "perchV2>.7_region" = "Perch v2.0, > 0.7, region list",
+  "perchV2>.9_region" = "Perch v2.0, > 0.9, region list"
+)
+
+# ==========================================
+# 2. DATA PREP & EFFORT CALCULATION
+# ==========================================
+cat("Loading data...\n")
+df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+df_filtered <- df %>%
+  filter(Dataset %in% base_datasets,
+         Summary_Level %in% initial_scales) %>%
+  mutate(Region = ifelse(grepl("PER", Dataset), "PER", "STM"))
+
+base_effort <- df %>%
+  filter(
+    (Dataset %in% c("PER", "STM_h", "STM_s_HTR") & Summary_Level == "15_Second_Interval") |
+    (Dataset == "STM_s_LTR" & Summary_Level == "15_Minute_Interval")
+  ) %>%
+  mutate(
+    Minute_Value = ifelse(Summary_Level == "15_Second_Interval", 0.25, 15),
+    Target_Site_Date = sub("_[^_]+$", "", Grouping),
+    Target_Site = sub("_[^_]+_[^_]+$", "", Grouping)
+  )
+
+effort_site_date <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site_Date) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site_Date")
+
+effort_site <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site")
+
+effort_combined <- bind_rows(effort_site_date, effort_site)
+
+# Merge efforts, filter for the correct macro scopes, and rename to "Macro"
+df_final <- df_filtered %>%
+  left_join(effort_combined, by = c("Dataset", "Summary_Level", "Grouping")) %>%
+  mutate(Effort_Minutes = replace_na(Effort_Minutes, 1)) %>%
+  filter(
+    Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval") |
+    (Region == "STM" & Summary_Level == "Site") |
+    (Region == "PER" & Summary_Level == "Site_Date")
+  ) %>%
+  mutate(
+    Summary_Level = ifelse(Summary_Level %in% c("Site", "Site_Date"), "Macro", Summary_Level)
+  )
+
+# ==========================================
+# 3. STATS FUNCTIONS (Returning Numerics)
+# ==========================================
+get_r2 <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  return(summary(mod)$adj.r.squared)
+}
+
+get_rho <- function(df_sub) {
+  return(cor(df_sub$ER, df_sub$SR, method = "spearman", use = "complete.obs"))
+}
+
+get_rmse <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  return(sqrt(sum(df_sub$Effort_Minutes * residuals(mod)^2) / sum(df_sub$Effort_Minutes)))
+}
+
+get_mae <- function(df_sub) {
+  mod <- lm(SR ~ ER, data = df_sub, weights = Effort_Minutes)
+  return(sum(df_sub$Effort_Minutes * abs(residuals(mod))) / sum(df_sub$Effort_Minutes))
+}
+
+# ==========================================
+# 4. CALCULATE METRICS & RESHAPE DATA
+# ==========================================
+cat("Calculating metrics...\n")
+
+stats_df <- df_final %>%
+  pivot_longer(cols = any_of(names(model_mapping)), 
+               names_to = "Raw_Model", 
+               values_to = "ER") %>%
+  filter(!is.na(SR) & !is.na(ER)) %>%
+  mutate(
+    Model_Label = model_mapping[Raw_Model],
+    Summary_Level = factor(Summary_Level, levels = ordered_scales)
+  ) %>%
+  group_by(Model_Label, Summary_Level) %>%
+  summarize(
+    R2 = get_r2(cur_data()),
+    Rho = get_rho(cur_data()),
+    RMSE = get_rmse(cur_data()),
+    MAE = get_mae(cur_data()),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = Summary_Level,
+    values_from = c(R2, Rho, RMSE, MAE),
+    names_glue = "{Summary_Level}_{.value}"
+  ) %>%
+  relocate(
+    Model_Label,
+    starts_with("15_Second_Interval"),
+    starts_with("1_Minute_Interval"),
+    starts_with("15_Minute_Interval"),
+    starts_with("Macro")
+  ) %>%
+  arrange(factor(Model_Label, levels = unname(model_mapping)))
+
+# ==========================================
+# 5. GENERATE NESTED JOURNAL TABLE
+# ==========================================
+cat("Generating journal-ready table...\n")
+
+pub_table <- stats_df %>%
+  gt() %>%
+  # --- SPANNERS ---
+  tab_spanner(label = md("**15-Second Interval**"), columns = starts_with("15_Second_Interval_")) %>%
+  tab_spanner(label = md("**1-Minute Interval**"), columns = starts_with("1_Minute_Interval_")) %>%
+  tab_spanner(label = md("**15-Minute Interval**"), columns = starts_with("15_Minute_Interval_")) %>%
+  tab_spanner(label = md("**Macro (~1 Hour)**"), columns = starts_with("Macro_")) %>%
+  
+  # --- LABELS & FORMATTING ---
+  cols_label(
+    Model_Label = "Model Configuration",
+    ends_with("_R2") ~ md("*R*<sup>2</sup>"),
+    ends_with("_Rho") ~ md("&rho;"),
+    ends_with("_RMSE") ~ "RMSE",
+    ends_with("_MAE") ~ "MAE"
+  ) %>%
+  fmt_number(columns = -Model_Label, decimals = 3) %>%
+  
+  # --- STYLING ---
+  tab_options(
+    table.border.top.color = "black", table.border.top.width = px(2),
+    table.border.bottom.color = "black", table.border.bottom.width = px(2),
+    heading.border.bottom.color = "black", heading.border.bottom.width = px(1),
+    column_labels.border.top.color = "black", column_labels.border.top.width = px(1),
+    column_labels.border.bottom.color = "black", column_labels.border.bottom.width = px(1),
+    table_body.border.bottom.color = "black", table_body.hlines.style = "none"
+  ) %>%
+  cols_align(align = "left", columns = Model_Label) %>%
+  cols_align(align = "center", columns = -Model_Label) %>%
+  tab_style(style = cell_fill(color = "#F5F5F5"), locations = cells_body(rows = Model_Label == "Unsupervised Clustering")) %>%
+  tab_style(style = list(cell_text(align = "center")), locations = cells_column_spanners()) %>%
+  
+  # --- DASHED VERTICAL SEPARATORS ---
+  tab_style(
+    style = cell_borders(
+      sides = "left", 
+      color = "gray70", 
+      style = "dashed", 
+      weight = px(1)
+    ),
+    locations = list(
+      cells_body(columns = c(`1_Minute_Interval_R2`, `15_Minute_Interval_R2`, Macro_R2)),
+      cells_column_labels(columns = c(`1_Minute_Interval_R2`, `15_Minute_Interval_R2`, Macro_R2))
+    )
+  ) %>%
+
+  # --- FOOTNOTE ---
+  tab_source_note(
+    source_note = md("Note: The top-performing models in each column are indicated by **bold** (1st), <u>underline</u> (2nd), and *italic* (3rd).")
+  )
+
+# --- DYNAMIC TYPOGRAPHY FOR TOP 3 RANKS ---
+apply_top_3_styling <- function(table_obj, col_name, ranks) {
+  table_obj %>%
+    tab_style(style = cell_text(weight = "bold"), locations = cells_body(columns = all_of(col_name), rows = ranks == 1)) %>%
+    tab_style(style = cell_text(style = "italic"), locations = cells_body(columns = all_of(col_name), rows = ranks == 3)) %>%
+    tab_style(style = cell_text(decorate = "underline"), locations = cells_body(columns = all_of(col_name), rows = ranks == 2))
+}
+
+max_cols <- grep("_R2$|_Rho$", names(stats_df), value = TRUE)
+for (col in max_cols) {
+  col_ranks <- rank(-stats_df[[col]], na.last = "keep", ties.method = "min")
+  pub_table <- apply_top_3_styling(pub_table, col, col_ranks)
+}
+
+min_cols <- grep("_RMSE$|_MAE$", names(stats_df), value = TRUE)
+for (col in min_cols) {
+  col_ranks <- rank(stats_df[[col]], na.last = "keep", ties.method = "min")
+  pub_table <- apply_top_3_styling(pub_table, col, col_ranks)
+}
+
+# ==========================================
+# 6. EXPORT
+# ==========================================
+gtsave(pub_table, paste0(output_dir, "Model_Performance_Summary_Table_v1_v2_2.html"))
+gtsave(pub_table, paste0(output_dir, "Model_Performance_Summary_Table_v1_v2_2.docx"))
+
+cat("Done! Table saved to:", output_dir, "as HTML and Word document (.docx)\n")
+```
+
+
+ Figure 4: multi-levels 
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggtext)
+library(patchwork)
+
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro.csv"
+output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+target_scales <- c(
+  "15_Second_Interval" = "15-Second Resolution",
+  "1_Minute_Interval"  = "1-Minute Resolution",
+  "15_Minute_Interval" = "15-Minute Resolution"
+)
+
+# Using EXACTLY the metrics requested
+metrics_list <- c(
+  "hier_euc_t0.7_br_noise_removed", "hier_euc_t0.7_fr_noise_removed", "hier_euc_t0.7_fr_all_channels",
+  "hier_euc_t0.7_br_all_channels",
+  "perchV2>.1_all", "perchV2>.1_region", "perchV2>.3_all", "perchV2>.3_region", 
+  "perchV2>.5_all", "perchV2>.5_region", "perchV2>.7_all", "perchV2>.7_region", 
+  "perchV2>.9_all", "perchV2>.9_region",
+  "br_3", "fr_3",
+  "br_ACI", "br_BI", "br_surface_roughness", "br_spectral_snr", 
+  "br_ACTspfract_avg", "br_EVNspCount_sum", "br_EVNspFract_avg", "br_ROIcover",
+  "fr_ACI", "fr_BI", "fr_surface_roughness", "fr_spectral_snr", 
+  "fr_ACTspfract_avg", "fr_EVNspCount_sum", "fr_EVNspFract_avg", "fr_ROIcover"
+)
+
+theme_mee_bar <- function() {
+  theme_classic(base_size = 12) +
+    theme(
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 11),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black"),
+      axis.title = element_text(face = "bold", size = 13),
+      plot.title = element_text(face = "bold", size = 14, hjust = 0),
+      plot.subtitle = element_text(size = 10, color = "gray30"),
+      legend.position = "right",
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 11),
+      panel.grid.major.x = element_line(color = "gray90", linetype = "solid"), 
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank()
+    )
+}
+
+clean_metric_name <- function(raw_name) {
+  # Handle Macro Suffixes
+  suffix <- ""
+  if (grepl("_15s_avg$", raw_name)) suffix <- " (15sec avgs)"
+  if (grepl("_1m_avg$", raw_name)) suffix <- " (1min avgs)"
+  if (grepl("_15m_avg$", raw_name)) suffix <- " (15min avgs)"
+  
+  core_name <- str_remove(raw_name, "_15s_avg$|_1m_avg$|_15m_avg$")
+  
+  if (core_name == "hier_euc_t0.7_br_noise_removed") return(paste0("[BR, noise removed] Hierarchical Clustering", suffix))
+  if (core_name == "hier_euc_t0.7_fr_noise_removed") return(paste0("[FR, noise removed] Hierarchical Clustering", suffix))
+  if (core_name == "hier_euc_t0.7_br_all_channels") return(paste0("[BR, all channels] Hierarchical Clustering", suffix))
+  if (core_name == "hier_euc_t0.7_fr_all_channels") return(paste0("[FR, all channels] Hierarchical Clustering", suffix))
+  if (core_name == "br_3") return(paste0("[BR] Active Channels", suffix))
+  if (core_name == "fr_3") return(paste0("[FR] Active Channels", suffix))
+  
+  if (grepl("perch", core_name)) {
+    clean <- gsub("perchV[12]>", "Perch (Conf > ", core_name)
+    clean <- gsub("_all", " All)", clean)
+    clean <- gsub("_region", " Region)", clean)
+    return(paste0(clean, suffix))
+  }
+  
+  if (grepl("^br_", core_name) || grepl("^fr_", core_name)) {
+    prefix <- ifelse(grepl("^br_", core_name), "[BR] ", "[FR] ")
+    core <- gsub("^[bf]r_", "", core_name)
+    core <- gsub("_avg", " (Avg)", core)
+    core <- gsub("_sum", " (Sum)", core)
+    core <- gsub("surface_roughness", "Surface Roughness", core)
+    core <- gsub("spectral_snr", "Spectral SNR", core)
+    return(paste0(prefix, core, suffix))
+  }
+  return(paste0(raw_name, suffix))
+}
+
+# ==========================================
+# 2. LOAD DATA
+# ==========================================
+cat("Loading master dataset...\n")
+df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
+
+# Convert metric columns to numeric
+df <- df %>% mutate(across(all_of(intersect(metrics_list, colnames(df))), ~as.numeric(na_if(as.character(.), ""))))
+
+# ==========================================
+# 3. BASE SCALES
+# ==========================================
+plots_list <- list()
+
+for (scale in names(target_scales)) {
+  scale_title <- target_scales[[scale]]
+  cat(sprintf("\n=== Processing scale: %s ===\n", scale))
+  
+  # Removed Dataset filtering completely
+  df_sub <- df %>% 
+    filter(Summary_Level == scale) %>% 
+    dplyr::select(SR, all_of(intersect(metrics_list, colnames(df))))
+  
+  if (nrow(df_sub) == 0) { cat("Warning: No rows found.\n"); next }
+
+  # CRUCIAL STEP: Find metrics that actually exist at this scale (ignoring 100% NA columns like br_3 for 1-min)
+  valid_metrics <- df_sub %>% 
+    dplyr::select(-SR) %>% summarise(across(everything(), ~sum(!is.na(.)))) %>% 
+    pivot_longer(everything()) %>% filter(value > 0) %>% pull(name)
+  
+  if (length(valid_metrics) == 0) { cat("Warning: No valid metric data.\n"); next }
+  
+  # ONLY run drop_na() on the valid metrics, preserving the data size
+  df_complete <- df_sub %>% dplyr::select(SR, all_of(valid_metrics)) %>% drop_na()
+  
+  cat("Total Raw Rows:", nrow(df_sub), "\n")
+  cat("Rows surviving drop_na() (N for models):", nrow(df_complete), "\n")
+  
+  if (nrow(df_complete) < 3) { cat("Warning: Not enough complete observations.\n"); next }
+
+  results_list <- list()
+  for (metric in valid_metrics) {
+    mod <- lm(as.formula(paste0("SR ~ `", metric, "`")), data = df_complete)
+    
+    category <- "Traditional Acoustic Index"
+    if (grepl("hier", metric)) category <- "Unsupervised Clustering"
+    if (grepl("br_3|fr_3", metric)) category <- "Source Separation"
+    if (grepl("perch", metric)) category <- "Perch Classifier"
+    
+    results_list[[metric]] <- data.frame(
+      Raw_Name = metric, Clean_Name = clean_metric_name(metric),
+      Category = category, R2 = max(0, summary(mod)$adj.r.squared), AIC = AIC(mod)
+    )
+  }
+  
+  results_df <- bind_rows(results_list) %>%
+    mutate(
+      Delta_AIC = AIC - min(AIC),
+      Bar_Label = ifelse(Delta_AIC < 2, 
+                         paste0(sprintf("%.3f", R2), " <b style='font-size: 22pt; color: black;'>*</b>"), 
+                         sprintf("%.3f", R2))
+    ) %>%
+    arrange(R2) %>% mutate(Clean_Name = factor(Clean_Name, levels = Clean_Name))
+  
+  p_rank <- ggplot(results_df, aes(x = R2, y = Clean_Name, fill = Category)) +
+    geom_col(color = "black", width = 0.8) +
+    geom_richtext(aes(label = Bar_Label), hjust = -0.15, size = 3.5, fill = NA, label.color = NA, color = "black") +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.20))) + 
+    scale_fill_manual(values = c("Unsupervised Clustering" = "#009E73", "Source Separation" = "#0072B2", "Perch Classifier" = "#CC79A7", "Traditional Acoustic Index" = "#E69F00")) +
+    labs(title = paste0("Predictive Power of Models (", scale_title, ")"), subtitle = "Ranked by Adjusted R² | * Indicates top-performing model(s) (\U0394 AIC < 2)", x = "Adjusted R²", y = NULL) +
+    theme_mee_bar() + guides(fill = guide_legend(override.aes = list(alpha = 1), order = 1))
+  
+  plots_list[[scale]] <- p_rank
+}
+
+# ==========================================
+# 4. MACRO (1-HOUR) SCALE
+# ==========================================
+cat("\n=== Processing scale: Macro (1-Hour) Resolution ===\n")
+
+# Acoustic indices for averaging
+acoustic_indices <- metrics_list[grepl("^br_|^fr_", metrics_list) & !grepl("3$", metrics_list)]
+
+# Updated to avoid relying on Dataset flags
+df <- df %>%
+  mutate(
+    Date_Extracted = str_extract(Grouping, "\\d{8}"),
+    # Safely extract Site, or use entire Grouping if no date pattern exists
+    Site_Extracted = ifelse(is.na(Date_Extracted), Grouping, str_extract(Grouping, "^.*?(?=_\\d{8})")),
+    # Macro Group joins Site + Date if a date exists, otherwise just uses Site
+    Macro_Group = ifelse(!is.na(Date_Extracted), paste(Site_Extracted, Date_Extracted, sep = "_"), Site_Extracted)
+  )
+
+# Group only by Macro_Group now
+calc_macro_avg <- function(data, suffix) {
+  data %>% group_by(Macro_Group) %>%
+    summarise(across(all_of(acoustic_indices), \(x) mean(x, na.rm = TRUE)), .groups = "drop") %>%
+    rename_with(~paste0(., suffix), all_of(acoustic_indices))
+}
+
+# No longer filtering by Dataset to calculate macro groupings
+df_15s_macro <- df %>% filter(Summary_Level == "15_Second_Interval") %>% calc_macro_avg("_15s_avg")
+df_1m_macro <- df %>% filter(Summary_Level == "1_Minute_Interval") %>% calc_macro_avg("_1m_avg")
+df_15m_macro <- df %>% filter(Summary_Level == "15_Minute_Interval") %>% calc_macro_avg("_15m_avg")
+
+# Keep all true site/date summaries regardless of Dataset
+macro_true_rows <- df %>%
+  filter(Summary_Level %in% c("Site", "Site_Date")) %>%
+  dplyr::select(Macro_Group, SR, all_of(intersect(metrics_list, colnames(df))))
+
+# Join entirely on Macro_Group
+macro_df_complete <- macro_true_rows %>%
+  left_join(df_15s_macro, by = "Macro_Group") %>%
+  left_join(df_1m_macro, by = "Macro_Group") %>%
+  left_join(df_15m_macro, by = "Macro_Group")
+
+macro_results <- list()
+
+# Fit models pairwise for macro to prevent massive data loss across mismatched average types
+for (metric in setdiff(colnames(macro_df_complete), c("Macro_Group", "SR"))) {
+  df_mod <- macro_df_complete %>% dplyr::select(SR, all_of(metric)) %>% drop_na()
+  
+  if (nrow(df_mod) >= 3) {
+    mod <- lm(as.formula(paste0("SR ~ `", metric, "`")), data = df_mod)
+    
+    category <- "Traditional Acoustic Index"
+    if (grepl("hier", metric)) category <- "Unsupervised Clustering"
+    if (grepl("br_3|fr_3", metric)) category <- "Source Separation"
+    if (grepl("perch", metric)) category <- "Perch Classifier"
+    
+    macro_results[[metric]] <- data.frame(
+      Raw_Name = metric, Clean_Name = clean_metric_name(metric),
+      Category = category, R2 = max(0, summary(mod)$adj.r.squared)
+    )
+  }
+}
+
+macro_res_df <- bind_rows(macro_results) %>%
+  arrange(R2) %>% mutate(Clean_Name = factor(Clean_Name, levels = Clean_Name), Bar_Label = sprintf("%.3f", R2))
+
+p_macro <- ggplot(macro_res_df, aes(x = R2, y = Clean_Name, fill = Category)) +
+  geom_col(color = "black", width = 0.8) +
+  geom_text(aes(label = Bar_Label), hjust = -0.15, size = 3.5, color = "black") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.20))) + 
+  scale_fill_manual(values = c("Unsupervised Clustering" = "#009E73", "Source Separation" = "#0072B2", "Perch Classifier" = "#CC79A7", "Traditional Acoustic Index" = "#E69F00")) +
+  labs(title = "Predictive Power of Models (Macro / 1-Hour Resolution)", subtitle = "Ranked by Adjusted R²", x = "Adjusted R²", y = NULL) +
+  theme_mee_bar() + guides(fill = guide_legend(override.aes = list(alpha = 1), order = 1))
+
+plots_list[["Macro"]] <- p_macro
+
+# ==========================================
+# 5. COMBINE & EXPORT
+# ==========================================
+cat("Combining plots using patchwork...\n")
+
+combined_plot <- (
+  (plots_list[["15_Second_Interval"]] / plots_list[["1_Minute_Interval"]] / plots_list[["15_Minute_Interval"]]) | 
+  plots_list[["Macro"]]
+) + plot_layout(guides = 'collect') & theme(legend.position = 'bottom')
+
+output_path <- paste0(output_dir, "Figure3_Combined_Resolutions.png")
+ggsave(output_path, combined_plot, width = 20, height = 14, dpi = 300)
+cat("Saved Combined Plot PNG to", output_path, "\n")
+```
+Fig. 4 spearman's rho (old structure, not sync'd with table)
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggtext)
+library(patchwork)
+
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro.csv"
+output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+target_scales <- c(
+  "15_Second_Interval" = "15-Second Resolution",
+  "1_Minute_Interval"  = "1-Minute Resolution",
+  "15_Minute_Interval" = "15-Minute Resolution"
+)
+
+# Using EXACTLY the metrics requested
+metrics_list <- c(
+  "hier_euc_t0.7_br_noise_removed", "hier_euc_t0.7_fr_noise_removed", "hier_euc_t0.7_fr_all_channels",
+  "hier_euc_t0.7_br_all_channels",
+  "perchV2>.1_all", "perchV2>.1_region", "perchV2>.3_all", "perchV2>.3_region", 
+  "perchV2>.5_all", "perchV2>.5_region", "perchV2>.7_all", "perchV2>.7_region", 
+  "perchV2>.9_all", "perchV2>.9_region",
+  "br_3", "fr_3",
+  "br_ACI", "br_BI", "br_surface_roughness", "br_spectral_snr", 
+  "br_ACTspfract_avg", "br_EVNspCount_sum", "br_EVNspFract_avg", "br_ROIcover",
+  "fr_ACI", "fr_BI", "fr_surface_roughness", "fr_spectral_snr", 
+  "fr_ACTspfract_avg", "fr_EVNspCount_sum", "fr_EVNspFract_avg", "fr_ROIcover"
+)
+
+theme_mee_bar <- function() {
+  theme_classic(base_size = 12) +
+    theme(
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 11),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black"),
+      axis.title = element_text(face = "bold", size = 13),
+      plot.title = element_text(face = "bold", size = 14, hjust = 0),
+      plot.subtitle = element_text(size = 10, color = "gray30"),
+      legend.position = "right",
+      legend.title = element_text(face = "bold", size = 12),
+      legend.text = element_text(size = 11),
+      panel.grid.major.x = element_line(color = "gray90", linetype = "solid"), 
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank()
+    )
+}
+
+clean_metric_name <- function(raw_name) {
+  suffix <- ""
+  if (grepl("_15s_avg$", raw_name)) suffix <- " (15sec avgs)"
+  if (grepl("_1m_avg$", raw_name)) suffix <- " (1min avgs)"
+  if (grepl("_15m_avg$", raw_name)) suffix <- " (15min avgs)"
+  
+  core_name <- str_remove(raw_name, "_15s_avg$|_1m_avg$|_15m_avg$")
+  
+  if (core_name == "hier_euc_t0.7_br_noise_removed") return(paste0("[BR, noise removed] Hierarchical Clustering", suffix))
+  if (core_name == "hier_euc_t0.7_fr_noise_removed") return(paste0("[FR, noise removed] Hierarchical Clustering", suffix))
+  if (core_name == "hier_euc_t0.7_br_all_channels") return(paste0("[BR, all channels] Hierarchical Clustering", suffix))
+  if (core_name == "hier_euc_t0.7_fr_all_channels") return(paste0("[FR, all channels] Hierarchical Clustering", suffix))
+  if (core_name == "br_3") return(paste0("[BR] Active Channels", suffix))
+  if (core_name == "fr_3") return(paste0("[FR] Active Channels", suffix))
+  
+  if (grepl("perch", core_name)) {
+    clean <- gsub("perchV[12]>", "Perch (Conf > ", core_name)
+    clean <- gsub("_all", " All)", clean)
+    clean <- gsub("_region", " Region)", clean)
+    return(paste0(clean, suffix))
+  }
+  
+  if (grepl("^br_", core_name) || grepl("^fr_", core_name)) {
+    prefix <- ifelse(grepl("^br_", core_name), "[BR] ", "[FR] ")
+    core <- gsub("^[bf]r_", "", core_name)
+    core <- gsub("_avg", " (Avg)", core)
+    core <- gsub("_sum", " (Sum)", core)
+    core <- gsub("surface_roughness", "Surface Roughness", core)
+    core <- gsub("spectral_snr", "Spectral SNR", core)
+    return(paste0(prefix, core, suffix))
+  }
+  return(paste0(raw_name, suffix))
+}
+
+# ==========================================
+# 2. LOAD DATA
+# ==========================================
+cat("Loading master dataset...\n")
+df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
+df <- df %>% mutate(across(all_of(intersect(metrics_list, colnames(df))), ~as.numeric(na_if(as.character(.), ""))))
+
+# ==========================================
+# 3. BASE SCALES
+# ==========================================
+plots_list <- list()
+
+for (scale in names(target_scales)) {
+  scale_title <- target_scales[[scale]]
+  cat(sprintf("\n=== Processing scale: %s ===\n", scale))
+  
+  df_sub <- df %>% 
+    filter(Summary_Level == scale) %>% 
+    dplyr::select(SR, all_of(intersect(metrics_list, colnames(df))))
+  
+  if (nrow(df_sub) == 0) { cat("Warning: No rows found.\n"); next }
+
+  valid_metrics <- df_sub %>% 
+    dplyr::select(-SR) %>% summarise(across(everything(), ~sum(!is.na(.)))) %>% 
+    pivot_longer(everything()) %>% filter(value > 0) %>% pull(name)
+  
+  if (length(valid_metrics) == 0) { cat("Warning: No valid metric data.\n"); next }
+  
+  cat("Total Raw Rows:", nrow(df_sub), "\n")
+  
+  # --- DIAGNOSTIC: Print N for each valid metric before listwise deletion ---
+  cat("\n--- DIAGNOSTIC: Non-NA counts per metric (Look for the lowest numbers here!) ---\n")
+  missing_report <- df_sub %>% dplyr::select(all_of(valid_metrics)) %>% summarise(across(everything(), ~sum(!is.na(.))))
+  print(t(as.matrix(missing_report)))
+  cat("----------------------------------------------------------------------------\n")
+  
+  # LISTWISE DELETION
+  df_complete <- df_sub %>% dplyr::select(SR, all_of(valid_metrics)) %>% drop_na()
+  cat("Rows surviving listwise deletion (Consistent N):", nrow(df_complete), "\n")
+  
+  if (nrow(df_complete) < 3) { 
+    cat("CRITICAL WARNING: Listwise deletion left fewer than 3 rows. Skipping this scale.\n")
+    next 
+  }
+
+  results_list <- list()
+  for (metric in valid_metrics) {
+    rho_val <- suppressWarnings(cor(df_complete$SR, df_complete[[metric]], method = "spearman"))
+    
+    category <- "Traditional Acoustic Index"
+    if (grepl("hier", metric)) category <- "Unsupervised Clustering"
+    if (grepl("br_3|fr_3", metric)) category <- "Source Separation"
+    if (grepl("perch", metric)) category <- "Perch Classifier"
+    
+    results_list[[metric]] <- data.frame(
+      Raw_Name = metric, Clean_Name = clean_metric_name(metric),
+      Category = category, Rho = rho_val, N_Obs = nrow(df_complete)
+    )
+  }
+  
+  if(length(results_list) > 0) {
+    results_df <- bind_rows(results_list) %>%
+      arrange(Rho) %>% 
+      mutate(
+        Clean_Name = factor(Clean_Name, levels = Clean_Name),
+        Bar_Label = sprintf("%.3f (N=%d)", Rho, N_Obs) 
+      )
+    
+    plots_list[[scale]] <- ggplot(results_df, aes(x = Rho, y = Clean_Name, fill = Category)) +
+      geom_col(color = "black", width = 0.8) +
+      geom_richtext(aes(label = Bar_Label, hjust = ifelse(Rho >= 0, -0.15, 1.15)), size = 5, fill = NA, label.color = NA, color = "black") +
+      scale_x_continuous(expand = expansion(mult = c(0.15, 0.25))) + 
+      scale_fill_manual(values = c("Unsupervised Clustering" = "#009E73", "Source Separation" = "#0072B2", "Perch Classifier" = "#CC79A7", "Traditional Acoustic Index" = "#E69F00")) +
+      labs(
+        title = paste0("Predictive Power of Metrics (", scale_title, ")"), 
+        subtitle = paste0("Ranked by Spearman's \u03C1 | Listwise N = ", unique(results_df$N_Obs)), 
+        x = "Spearman's Rho (\u03C1)", y = NULL
+      ) +
+      theme_mee_bar() + guides(fill = guide_legend(override.aes = list(alpha = 1), order = 1))
+  }
+}
+
+# ==========================================
+# 4. MACRO (1-HOUR) SCALE
+# ==========================================
+cat("\n=== Processing scale: Macro (1-Hour) Resolution ===\n")
+
+acoustic_indices <- metrics_list[grepl("^br_|^fr_", metrics_list) & !grepl("3$", metrics_list)]
+
+df <- df %>%
+  mutate(
+    Date_Extracted = str_extract(Grouping, "\\d{8}"),
+    Site_Extracted = ifelse(is.na(Date_Extracted), Grouping, str_extract(Grouping, "^.*?(?=_\\d{8})")),
+    Macro_Group = ifelse(!is.na(Date_Extracted), paste(Site_Extracted, Date_Extracted, sep = "_"), Site_Extracted)
+  )
+
+calc_macro_avg <- function(data, suffix) {
+  data %>% group_by(Macro_Group) %>%
+    summarise(across(all_of(acoustic_indices), \(x) mean(x, na.rm = TRUE)), .groups = "drop") %>%
+    rename_with(~paste0(., suffix), all_of(acoustic_indices))
+}
+
+df_15s_macro <- df %>% filter(Summary_Level == "15_Second_Interval") %>% calc_macro_avg("_15s_avg")
+df_1m_macro <- df %>% filter(Summary_Level == "1_Minute_Interval") %>% calc_macro_avg("_1m_avg")
+df_15m_macro <- df %>% filter(Summary_Level == "15_Minute_Interval") %>% calc_macro_avg("_15m_avg")
+
+macro_true_rows <- df %>%
+  filter(Summary_Level %in% c("Site", "Site_Date")) %>%
+  dplyr::select(Macro_Group, SR, all_of(intersect(metrics_list, colnames(df))))
+
+macro_df_complete <- macro_true_rows %>%
+  left_join(df_15s_macro, by = "Macro_Group") %>%
+  left_join(df_1m_macro, by = "Macro_Group") %>%
+  left_join(df_15m_macro, by = "Macro_Group")
+
+macro_metrics_all <- setdiff(colnames(macro_df_complete), c("Macro_Group", "SR"))
+valid_macro_metrics <- macro_df_complete %>%
+  dplyr::select(all_of(macro_metrics_all)) %>%
+  summarise(across(everything(), ~sum(!is.na(.)))) %>%
+  pivot_longer(everything()) %>% filter(value > 0) %>% pull(name)
+
+cat("Macro Raw Groups:", nrow(macro_df_complete), "\n")
+
+# --- DIAGNOSTIC: Print N for each macro metric before listwise deletion ---
+cat("\n--- DIAGNOSTIC: Macro non-NA counts per metric ---\n")
+missing_macro_report <- macro_df_complete %>% dplyr::select(all_of(valid_macro_metrics)) %>% summarise(across(everything(), ~sum(!is.na(.))))
+print(t(as.matrix(missing_macro_report)))
+cat("----------------------------------------------------\n")
+
+# LISTWISE DELETION
+macro_df_complete_clean <- macro_df_complete %>% 
+  dplyr::select(Macro_Group, SR, all_of(valid_macro_metrics)) %>% 
+  drop_na()
+
+cat("Macro Groups surviving listwise deletion:", nrow(macro_df_complete_clean), "\n")
+
+if (nrow(macro_df_complete_clean) < 3) {
+  cat("CRITICAL WARNING: Macro scale dropped below 3 rows after listwise deletion. Skipping plot.\n")
+} else {
+  macro_results <- list()
+  for (metric in valid_macro_metrics) {
+    rho_val <- suppressWarnings(cor(macro_df_complete_clean$SR, macro_df_complete_clean[[metric]], method = "spearman"))
+    
+    category <- "Traditional Acoustic Index"
+    if (grepl("hier", metric)) category <- "Unsupervised Clustering"
+    if (grepl("br_3|fr_3", metric)) category <- "Source Separation"
+    if (grepl("perch", metric)) category <- "Perch Classifier"
+    
+    macro_results[[metric]] <- data.frame(
+      Raw_Name = metric, Clean_Name = clean_metric_name(metric),
+      Category = category, Rho = rho_val, N_Obs = nrow(macro_df_complete_clean)
+    )
+  }
+
+  if(length(macro_results) > 0) {
+    macro_res_df <- bind_rows(macro_results) %>%
+      arrange(Rho) %>% 
+      mutate(
+        Clean_Name = factor(Clean_Name, levels = Clean_Name), 
+        Bar_Label = sprintf("%.3f (N=%d)", Rho, N_Obs)
+      )
+
+    plots_list[["Macro"]] <- ggplot(macro_res_df, aes(x = Rho, y = Clean_Name, fill = Category)) +
+      geom_col(color = "black", width = 0.8) +
+      geom_text(aes(label = Bar_Label, hjust = ifelse(Rho >= 0, -0.15, 1.15)), size = 3.5, color = "black") +
+      scale_x_continuous(expand = expansion(mult = c(0.15, 0.25))) + 
+      scale_fill_manual(values = c("Unsupervised Clustering" = "#009E73", "Source Separation" = "#0072B2", "Perch Classifier" = "#CC79A7", "Traditional Acoustic Index" = "#E69F00")) +
+      labs(
+        title = "Predictive Power of Metrics (Macro / 1-Hour Resolution)", 
+        subtitle = paste0("Ranked by Spearman's \u03C1 | Listwise N = ", unique(macro_res_df$N_Obs)), 
+        x = "Spearman's Rho (\u03C1)", y = NULL
+      ) +
+      theme_mee_bar() + guides(fill = guide_legend(override.aes = list(alpha = 1), order = 1))
+  }
+}
+
+# ==========================================
+# 5. COMBINE & EXPORT
+# ==========================================
+if(length(plots_list) > 0) {
+  cat("Combining plots using patchwork...\n")
+  # Filter out NULLs in case some scales failed
+  plots_list <- Filter(Negate(is.null), plots_list)
+  
+  combined_plot <- wrap_plots(plots_list, ncol = 2) + 
+    plot_layout(guides = 'collect') & theme(legend.position = 'bottom')
+
+  output_path <- paste0(output_dir, "Figure4_Combined_Resolutions_spearmanrho.png")
+  ggsave(output_path, combined_plot, width = 20, height = 14, dpi = 300)
+  cat("Saved Combined Plot PNG to", output_path, "\n")
+} else {
+  cat("All plots failed due to missing data. No output generated.\n")
+}
+```
+
+fig 4 adjusted R2
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggtext)
+library(patchwork)
+
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
+output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+target_scales <- c(
+  "15_Second_Interval" = "15-Second Resolution",
+  "1_Minute_Interval"  = "1-Minute Resolution",
+  "15_Minute_Interval" = "15-Minute Resolution",
+  "Macro"              = "Macro (~1 Hour) Resolution"
+)
+
+base_datasets <- c("PER", "STM_h", "STM_s_HTR", "STM_s_LTR")
+
+# Using EXACTLY the metrics requested
+metrics_list <- c(
+  "hier_euc_t0.7_br_noise_removed", "hier_euc_t0.7_fr_noise_removed", "hier_euc_t0.7_fr_all_channels",
+  "hier_euc_t0.7_br_all_channels",
+  "perchV2>.1_all", "perchV2>.1_region", "perchV2>.3_all", "perchV2>.3_region", 
+  "perchV2>.5_all", "perchV2>.5_region", "perchV2>.7_all", "perchV2>.7_region", 
+  "perchV2>.9_all", "perchV2>.9_region",
+  "br_3", "fr_3",
+  "br_ACI", "br_BI", "br_surface_roughness", "br_spectral_snr", 
+  "br_ACTspfract_avg", "br_EVNspCount_sum", "br_EVNspFract_avg", "br_ROIcover",
+  "fr_ACI", "fr_BI", "fr_surface_roughness", "fr_spectral_snr", 
+  "fr_ACTspfract_avg", "fr_EVNspCount_sum", "fr_EVNspFract_avg", "fr_ROIcover"
+)
+
+theme_mee_bar <- function() {
+  theme_classic(base_size = 12) +
+    theme(
+      axis.text.y = element_text(color = "black", size = 10),
+      axis.text.x = element_text(color = "black", size = 11),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black"),
+      axis.title = element_text(face = "bold", size = 13),
+      plot.title = element_text(face = "bold", size = 18, hjust = 0),
+      plot.subtitle = element_text(size = 12, color = "gray30"),
+      legend.position = "right",
+      legend.title = element_text(face = "bold", size = 18),       
+      legend.text = element_text(size = 16),                       
+      legend.key.size = unit(1.2, "cm"),                           
+      legend.spacing.x = unit(0.4, "cm"),                          
+      panel.grid.major.x = element_line(color = "gray90", linetype = "solid"), 
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank()
+    )
+}
+
+clean_metric_name <- function(raw_name) {
+  if (raw_name == "hier_euc_t0.7_br_noise_removed") return("[BR, noise removed] Hierarchical Clustering")
+  if (raw_name == "hier_euc_t0.7_fr_noise_removed") return("[FR, noise removed] Hierarchical Clustering")
+  if (raw_name == "hier_euc_t0.7_br_all_channels") return("[BR, all channels] Hierarchical Clustering")
+  if (raw_name == "hier_euc_t0.7_fr_all_channels") return("[FR, all channels] Hierarchical Clustering")
+  if (raw_name == "br_3") return("[BR] Active Channels")
+  if (raw_name == "fr_3") return("[FR] Active Channels")
+  
+  if (grepl("perch", raw_name)) {
+    clean <- gsub("perchV[12]>", "Perch (Conf > ", raw_name)
+    clean <- gsub("_all", " All)", clean)
+    clean <- gsub("_region", " Region)", clean)
+    return(clean)
+  }
+  
+  if (grepl("^br_", raw_name) || grepl("^fr_", raw_name)) {
+    prefix <- ifelse(grepl("^br_", raw_name), "[BR] ", "[FR] ")
+    core <- gsub("^[bf]r_", "", raw_name)
+    core <- gsub("_avg", " (Avg)", core)
+    core <- gsub("_sum", " (Sum)", core)
+    core <- gsub("surface_roughness", "Surface Roughness", core)
+    core <- gsub("spectral_snr", "Spectral SNR", core)
+    return(paste0(prefix, core))
+  }
+  return(raw_name)
+}
+
+# ==========================================
+# 2. LOAD DATA & SYNC MACRO LOGIC WITH TABLE SCRIPT
+# ==========================================
+cat("Loading and processing master dataset...\n")
+df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
+df <- df %>% mutate(across(all_of(intersect(metrics_list, colnames(df))), ~as.numeric(na_if(as.character(.), ""))))
+
+# 1. Filter Datasets identically to Table Script
+df_filtered <- df %>%
+  filter(Dataset %in% base_datasets) %>%
+  mutate(Region = ifelse(grepl("PER", Dataset), "PER", "STM"))
+
+# 2. Calculate Effort Minutes identically to Table Script
+base_effort <- df %>%
+  filter(
+    (Dataset %in% c("PER", "STM_h", "STM_s_HTR") & Summary_Level == "15_Second_Interval") |
+    (Dataset == "STM_s_LTR" & Summary_Level == "15_Minute_Interval")
+  ) %>%
+  mutate(
+    Minute_Value = ifelse(Summary_Level == "15_Second_Interval", 0.25, 15),
+    Target_Site_Date = sub("_[^_]+$", "", Grouping),
+    Target_Site = sub("_[^_]+_[^_]+$", "", Grouping)
+  )
+
+effort_site_date <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site_Date) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site_Date")
+
+effort_site <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site")
+
+effort_combined <- bind_rows(effort_site_date, effort_site)
+
+# 3. Final merge and Macro definition identically to Table Script
+df_final <- df_filtered %>%
+  left_join(effort_combined, by = c("Dataset", "Summary_Level", "Grouping")) %>%
+  mutate(Effort_Minutes = replace_na(Effort_Minutes, 1)) %>%
+  filter(
+    Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval") |
+    (Region == "STM" & Summary_Level == "Site") |
+    (Region == "PER" & Summary_Level == "Site_Date")
+  ) %>%
+  mutate(
+    Summary_Level = ifelse(Summary_Level %in% c("Site", "Site_Date"), "Macro", Summary_Level)
+  )
+
+# ==========================================
+# 3. GENERATE PLOTS (Pairwise Deletion & Weighted lm)
+# ==========================================
+plots_list <- list()
+
+legend_categories <- c("Traditional Acoustic Index", "Unsupervised Clustering", "Source Separation", "Perch Classifier")
+
+for (scale in names(target_scales)) {
+  scale_title <- target_scales[[scale]]
+  cat(sprintf("\n=== Processing scale: %s ===\n", scale))
+  
+  df_sub <- df_final %>% filter(Summary_Level == scale)
+  
+  if (nrow(df_sub) == 0) { cat("Warning: No rows found.\n"); next }
+
+  results_list <- list()
+  for (metric in metrics_list) {
+    if (!metric %in% colnames(df_sub)) next
+    
+    df_mod <- df_sub %>% dplyr::select(SR, all_of(metric), Effort_Minutes) %>% drop_na()
+    
+    if (nrow(df_mod) < 3) next
+    
+    mod <- lm(as.formula(paste0("SR ~ `", metric, "`")), data = df_mod, weights = Effort_Minutes)
+    
+    r2_val <- max(0, summary(mod)$adj.r.squared)
+    
+    category <- "Traditional Acoustic Index"
+    if (grepl("hier", metric)) category <- "Unsupervised Clustering"
+    if (grepl("br_3|fr_3", metric)) category <- "Source Separation"
+    if (grepl("perch", metric)) category <- "Perch Classifier"
+    
+    results_list[[metric]] <- data.frame(
+      Raw_Name = metric, Clean_Name = clean_metric_name(metric),
+      Category = category, R2 = r2_val, N_Obs = nrow(df_mod)
+    )
+  }
+  
+  if (length(results_list) > 0) {
+    results_df <- bind_rows(results_list) %>%
+      arrange(R2) %>% 
+      mutate(
+        Clean_Name = factor(Clean_Name, levels = Clean_Name),
+        Bar_Label = sprintf("%.3f", R2) 
+      )
+    
+    p_rank <- ggplot(results_df, aes(x = R2, y = Clean_Name, fill = Category)) +
+      geom_col(color = "black", width = 0.8) +
+      geom_richtext(aes(label = Bar_Label, hjust = -0.15), size = 5, fill = NA, label.color = NA, color = "black") +
+      scale_x_continuous(expand = expansion(mult = c(0, 0.25))) + 
+      scale_fill_manual(
+        values = c("Unsupervised Clustering" = "#009E73", "Source Separation" = "#0072B2", "Perch Classifier" = "#CC79A7", "Traditional Acoustic Index" = "#E69F00"),
+        limits = legend_categories
+      ) +
+      labs(
+        title = paste0("Predictive Power of Metrics (", scale_title, ")"), 
+        subtitle = "Ranked by Adjusted R²", 
+        x = "Adjusted R²", y = NULL,
+        fill = "Model Type"
+      ) +
+      theme_mee_bar() + 
+      # Added nrow = 2 to ensure the larger text doesn't cut off at the screen edges
+      guides(fill = guide_legend(override.aes = list(alpha = 1), order = 1, nrow = 2))
+    
+    plots_list[[scale]] <- p_rank
+  }
+}
+
+# ==========================================
+# 4. COMBINE & EXPORT
+# ==========================================
+if (length(plots_list) > 0) {
+  cat("\nCombining plots using patchwork...\n")
+  
+  valid_plots <- Filter(Negate(is.null), plots_list)
+  
+  # Ensure the plots are generated in the exact order requested
+  if (all(names(target_scales) %in% names(valid_plots))) {
+    valid_plots <- valid_plots[names(target_scales)]
+  }
+  
+  # Switched to a flat wrap_plots layout. This completely avoids nested patchwork layers 
+  # and ensures guides='collect' merges everything properly into a single legend.
+  combined_plot <- wrap_plots(valid_plots, ncol = 2) + 
+    plot_layout(guides = 'collect') & 
+    theme(
+      legend.position = 'bottom',
+      legend.box.margin = margin(t = 20, r = 0, b = 0, l = 0) # Gives breathing room above the legend
+    )
+
+  output_path <- paste0(output_dir, "Figure4_Combined_Resolutions_R2_2.png")
+  ggsave(output_path, combined_plot, width = 20, height = 22, dpi = 300)
+  cat("Saved Combined Plot PNG to", output_path, "\n")
+}
+```
+
+Fig. 4 without Perch
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggtext)
+library(patchwork)
+
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
+output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+target_scales <- c(
+  "15_Second_Interval" = "15-Second Resolution",
+  "1_Minute_Interval"  = "1-Minute Resolution",
+  "15_Minute_Interval" = "15-Minute Resolution",
+  "Macro"              = "Macro (~1 Hour) Resolution"
+)
+
+base_datasets <- c("PER", "STM_h", "STM_s_HTR", "STM_s_LTR")
+
+# Using EXACTLY the metrics requested, minus perch and source separation outputs
+metrics_list <- c(
+  "hier_euc_t0.7_br_noise_removed", "hier_euc_t0.7_fr_noise_removed", "hier_euc_t0.7_fr_all_channels",
+  "hier_euc_t0.7_br_all_channels",
+  "br_ACI", "br_BI", "br_surface_roughness", "br_spectral_snr", 
+  "br_ACTspfract_avg", "br_EVNspCount_sum", "br_EVNspFract_avg", "br_ROIcover",
+  "fr_ACI", "fr_BI", "fr_surface_roughness", "fr_spectral_snr", 
+  "fr_ACTspfract_avg", "fr_EVNspCount_sum", "fr_EVNspFract_avg", "fr_ROIcover"
+)
+
+theme_mee_bar <- function() {
+  theme_classic(base_size = 12) +
+    theme(
+      axis.text.y = element_text(color = "black", size = 16),
+      axis.text.x = element_text(color = "black", size = 20),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black"),
+      axis.title = element_text(face = "bold", size = 20),
+      plot.title = element_text(face = "bold", size = 30, hjust = 0),
+      plot.subtitle = element_text(size = 19, color = "gray30"),
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.title = element_text(face = "bold", size = 22),        
+      legend.text = element_text(size = 20, face = "bold"),                        
+      legend.key.size = unit(1.2, "cm"),                            
+      legend.spacing.x = unit(2, "cm"),                           
+      panel.grid.major.x = element_line(color = "gray90", linetype = "solid"), 
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank()
+    )
+}
+
+clean_metric_name <- function(raw_name) {
+  if (raw_name == "hier_euc_t0.7_br_noise_removed") return("[BR, noise removed] Hierarchical Clustering")
+  if (raw_name == "hier_euc_t0.7_fr_noise_removed") return("[FR, noise removed] Hierarchical Clustering")
+  if (raw_name == "hier_euc_t0.7_br_all_channels") return("[BR, all channels] Hierarchical Clustering")
+  if (raw_name == "hier_euc_t0.7_fr_all_channels") return("[FR, all channels] Hierarchical Clustering")
+  
+  if (grepl("^br_", raw_name) || grepl("^fr_", raw_name)) {
+    prefix <- ifelse(grepl("^br_", raw_name), "[BR] ", "[FR] ")
+    core <- gsub("^[bf]r_", "", raw_name)
+    core <- gsub("_avg", " (Avg)", core)
+    core <- gsub("_sum", " (Sum)", core)
+    core <- gsub("surface_roughness", "Surface Roughness", core)
+    core <- gsub("spectral_snr", "Spectral SNR", core)
+    return(paste0(prefix, core))
+  }
+  return(raw_name)
+}
+
+# ==========================================
+# 2. LOAD DATA & SYNC MACRO LOGIC WITH TABLE SCRIPT
+# ==========================================
+cat("Loading and processing master dataset...\n")
+df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
+df <- df %>% mutate(across(all_of(intersect(metrics_list, colnames(df))), ~as.numeric(na_if(as.character(.), ""))))
+
+# 1. Filter Datasets identically to Table Script
+df_filtered <- df %>%
+  filter(Dataset %in% base_datasets) %>%
+  mutate(Region = ifelse(grepl("PER", Dataset), "PER", "STM"))
+
+# 2. Calculate Effort Minutes identically to Table Script
+base_effort <- df %>%
+  filter(
+    (Dataset %in% c("PER", "STM_h", "STM_s_HTR") & Summary_Level == "15_Second_Interval") |
+    (Dataset == "STM_s_LTR" & Summary_Level == "15_Minute_Interval")
+  ) %>%
+  mutate(
+    Minute_Value = ifelse(Summary_Level == "15_Second_Interval", 0.25, 15),
+    Target_Site_Date = sub("_[^_]+$", "", Grouping),
+    Target_Site = sub("_[^_]+_[^_]+$", "", Grouping)
+  )
+
+effort_site_date <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site_Date) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site_Date")
+
+effort_site <- base_effort %>%
+  group_by(Dataset, Grouping = Target_Site) %>%
+  summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Summary_Level = "Site")
+
+effort_combined <- bind_rows(effort_site_date, effort_site)
+
+# 3. Final merge and Macro definition identically to Table Script
+df_final <- df_filtered %>%
+  left_join(effort_combined, by = c("Dataset", "Summary_Level", "Grouping")) %>%
+  mutate(Effort_Minutes = replace_na(Effort_Minutes, 1)) %>%
+  filter(
+    Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval") |
+    (Region == "STM" & Summary_Level == "Site") |
+    (Region == "PER" & Summary_Level == "Site_Date")
+  ) %>%
+  mutate(
+    Summary_Level = ifelse(Summary_Level %in% c("Site", "Site_Date"), "Macro", Summary_Level)
+  )
+
+# ==========================================
+# 3. GENERATE PLOTS (Pairwise Deletion & Weighted lm)
+# ==========================================
+plots_list <- list()
+all_results_list <- list()
+
+legend_categories <- c("Traditional Acoustic Index", "Unsupervised Clustering")
+
+# --- PASS 1: Calculate models to determine the global max R² ---
+cat("Fitting models across all scales to synchronize X-axes...\n")
+for (scale in names(target_scales)) {
+  df_sub <- df_final %>% filter(Summary_Level == scale)
+  if (nrow(df_sub) == 0) next
+  
+  for (metric in metrics_list) {
+    if (!metric %in% colnames(df_sub)) next
+    
+    df_mod <- df_sub %>% dplyr::select(SR, all_of(metric), Effort_Minutes) %>% drop_na()
+    if (nrow(df_mod) < 3) next
+    
+    mod <- lm(as.formula(paste0("SR ~ `", metric, "`")), data = df_mod, weights = Effort_Minutes)
+    r2_val <- max(0, summary(mod)$adj.r.squared)
+    
+    category <- "Traditional Acoustic Index"
+    if (grepl("hier", metric)) category <- "Unsupervised Clustering"
+    
+    all_results_list[[length(all_results_list) + 1]] <- data.frame(
+      Scale = scale,
+      Raw_Name = metric, Clean_Name = clean_metric_name(metric),
+      Category = category, R2 = r2_val, N_Obs = nrow(df_mod)
+    )
+  }
+}
+
+all_results_df <- bind_rows(all_results_list)
+
+# Find global maximum R² to lock the axis limits across all subplots
+global_max_r2 <- max(all_results_df$R2, na.rm = TRUE)
+
+# --- PASS 2: Generate the plots with standardized scaling ---
+for (scale in names(target_scales)) {
+  scale_title <- target_scales[[scale]]
+  cat(sprintf("\n=== Generating plot for scale: %s ===\n", scale))
+  
+  results_df <- all_results_df %>% filter(Scale == scale)
+  
+  if (nrow(results_df) > 0) {
+    results_df <- results_df %>%
+      arrange(R2) %>% 
+      mutate(
+        Clean_Name = factor(Clean_Name, levels = Clean_Name),
+        Bar_Label = sprintf("%.3f", R2) 
+      )
+    
+    p_rank <- ggplot(results_df, aes(x = R2, y = Clean_Name, fill = Category)) +
+      geom_col(color = "black", width = 0.8) +
+      geom_richtext(aes(label = Bar_Label, hjust = -0.15), size = 6, fill = NA, label.color = NA, face = "bold", color = "black") +
+      scale_x_continuous(limits = c(0, global_max_r2), expand = expansion(mult = c(0, 0.20))) + 
+      scale_fill_manual(
+        values = c("Unsupervised Clustering" = "#009E73", "Traditional Acoustic Index" = "#E69F00"),
+        limits = legend_categories
+      ) +
+      labs(
+        title = scale_title,  
+        subtitle = "Ranked by Adjusted R²", 
+        x = "Adjusted R²", y = NULL,
+        fill = "Metric Type"
+      ) +
+      theme_mee_bar() + 
+      # explicitly centering title alongside keys
+      guides(fill = guide_legend(override.aes = list(alpha = 1), order = 1, nrow = 1, title.position = "left", title.vjust = 0.5))
+    
+    plots_list[[scale]] <- p_rank
+  }
+}
+
+# ==========================================
+# 4. COMBINE & EXPORT
+# ==========================================
+if (length(plots_list) > 0) {
+  cat("\nCombining plots using patchwork...\n")
+  
+  valid_plots <- Filter(Negate(is.null), plots_list)
+  
+  if (all(names(target_scales) %in% names(valid_plots))) {
+    valid_plots <- valid_plots[names(target_scales)]
+  }
+  
+  combined_plot <- wrap_plots(valid_plots, ncol = 2) + 
+    plot_layout(guides = 'collect') & 
+    theme(
+      legend.position = 'bottom',
+      legend.direction = 'horizontal', 
+      legend.justification = c(0.5, 0.5), # Hard-locks the center anchor point
+      legend.box.just = 'center',         
+      legend.margin = margin(t = 20, r = 0, b = 10, l = 0) # Removed side margins to prevent invisible shoves
+    )
+
+  # Display the plot directly in the R session viewer
+  print(combined_plot)
+
+  output_path <- paste0(output_dir, "Figure4_Combined_Resolutions_R2_noPerch.png")
+  
+  ggsave(output_path, combined_plot, width = 26, height = 22, dpi = 300)
+  cat("Saved Combined Plot PNG to", output_path, "\n")
+}
+```
+
