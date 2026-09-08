@@ -254,8 +254,7 @@ output_path <- paste0(output_dir, "figure2_2.png")
 ggsave(output_path, p, width = 10, height = 9, dpi = 300)
 cat("Done! Saved plot to:", output_path, "\n")
 ```
-fig 3 with 2 (loops). think i'm just gonna use the one with 3; if use need to update a couple things.  keeping till we decide 2 or 3.
-
+fig 3. with just perch 2.0:
 ```{r}
 library(ggplot2)
 library(dplyr)
@@ -265,7 +264,7 @@ library(patchwork)
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro.csv"
+input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
 output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
 
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
@@ -335,7 +334,7 @@ effort_site <- base_effort %>%
 
 effort_combined <- bind_rows(effort_site_date, effort_site)
 
-# Merge efforts, filter for the correct macro scopes, and rename
+# Merge efforts, filter for the correct scopes, and re-combine into Macro
 df_final <- df_filtered %>%
   left_join(effort_combined, by = c("Dataset", "Summary_Level", "Grouping")) %>%
   mutate(Effort_Minutes = replace_na(Effort_Minutes, 1)) %>%
@@ -377,21 +376,21 @@ get_mae <- function(df_sub) {
 # ==========================================
 # 4. DYNAMIC PLOTTING FUNCTION
 # ==========================================
-create_model_comparison_plot <- function(scale_name, data, er_col_perch, perch_label, show_y_label = TRUE, show_x_label = TRUE) {
+create_model_comparison_plot <- function(scale_name, data, er_col_perchV2, perchV2_label, show_y_label = TRUE, show_x_label = TRUE) {
   
   # Create a named vector dynamically to properly map the selected variables in dplyr::select
   select_map <- c("SR", "Effort_Minutes", "Unsupervised Hierarchical Clusters" = er_col_cluster)
-  select_map[perch_label] <- er_col_perch
+  select_map[perchV2_label] <- er_col_perchV2
 
   sub_df <- data %>% 
     filter(Summary_Level == scale_name) %>%
     dplyr::select(all_of(select_map)) %>%
-    pivot_longer(cols = c(`Unsupervised Hierarchical Clusters`, all_of(perch_label)), 
+    pivot_longer(cols = c(`Unsupervised Hierarchical Clusters`, all_of(perchV2_label)), 
                  names_to = "Model", values_to = "ER") %>%
     filter(!is.na(SR) & !is.na(ER)) %>%
     mutate(
-      # Cap visual size at 60 mins to prevent anything artificially ballooning
-      Plot_Effort = ifelse(Effort_Minutes > 60, 60, Effort_Minutes)
+      # Factor the model column so it always plots as Clusters -> V2
+      Model = factor(Model, levels = c("Unsupervised Hierarchical Clusters", perchV2_label))
     )
   
   if(nrow(sub_df) == 0) return(NULL)
@@ -419,50 +418,52 @@ create_model_comparison_plot <- function(scale_name, data, er_col_perch, perch_l
   
   is_dense <- scale_name %in% c("15_Second_Interval", "1_Minute_Interval")
   is_macro <- scale_name == "Macro (~1 Hour)"
+  
   pt_alpha <- ifelse(is_dense, 0.05, 0.6) 
-  
-  p <- ggplot(sub_df, aes(x = ER, y = SR, color = Model))
-  
-  # Using a standard linear model across all scales
-  if (is_macro) {
-    p <- p + geom_point(aes(size = Plot_Effort), alpha = pt_alpha) +
-             scale_size_continuous(name = "Effort (Minutes)", 
-                                   range = c(2, 6), 
-                                   breaks = c(15, 30, 45, 60),
-                                   guide = "none") 
-    smooth_layer <- geom_smooth(aes(weight = Effort_Minutes), method = "lm", formula = y ~ x, se = TRUE, alpha = 0.2, linewidth = 1, show.legend = FALSE)
-  } else {
-    pt_size <- ifelse(is_dense, 1, 2.5)
-    p <- p + geom_point(alpha = pt_alpha, size = pt_size)
-    smooth_layer <- geom_smooth(aes(weight = Effort_Minutes), method = "lm", formula = y ~ x, se = TRUE, alpha = 0.2, linewidth = 1, show.legend = FALSE)
-  }
+  pt_size <- ifelse(is_macro, 6, ifelse(is_dense, 1, 2.5))
   
   plot_title <- gsub("_", " ", scale_name)
   y_axis_lab <- if(show_y_label) "Observed Richness (SR)" else NULL
   x_axis_lab <- if(show_x_label) "Estimated Richness (ER)" else NULL
   
-  p <- p + 
+  p <- ggplot(sub_df, aes(x = ER, y = SR, color = Model)) +
+    geom_point(alpha = pt_alpha, size = pt_size) +
     geom_abline(data = stats_df, aes(intercept = 0, slope = ideal_slope), 
                 linetype = "dashed", color = "gray50", linewidth = 0.8, inherit.aes = FALSE) +
-    smooth_layer +
+    geom_smooth(aes(weight = Effort_Minutes), method = "lm", formula = y ~ x, se = TRUE, alpha = 0.2, linewidth = 1, show.legend = FALSE) +
     geom_label(data = stats_df, 
                aes(x = Inf, y = -Inf, label = label, color = Model), 
                hjust = 1.1, vjust = -0.1, 
                fill = "white", label.size = 0.5, label.padding = unit(0.3, "lines"),
                size = 3.5, fontface = "bold", lineheight = 0.9, show.legend = FALSE) +
+    # Switch to ncol = 2 to fit both models
     facet_wrap(~ Model, ncol = 2, scales = "free_x") + 
     scale_color_manual(
-      values = setNames(c("#3C5488", "#E64B35"), c("Unsupervised Hierarchical Clusters", perch_label)),
-      labels = setNames(c("Clusters", "Perch"), c("Unsupervised Hierarchical Clusters", perch_label))
+      values = setNames(c("#3C5488", "#E64B35"), 
+                        c("Unsupervised Hierarchical Clusters", perchV2_label)),
+      labels = setNames(c("Clusters", "Perch v2.0"), 
+                        c("Unsupervised Hierarchical Clusters", perchV2_label))
     ) +
-    scale_x_continuous(expand = expansion(mult = c(0.05, 0.05))) + 
+    
+    # Force axes to start at exactly 0 and use integer-only breaks
+    scale_x_continuous(
+      limits = c(0, NA), 
+      expand = expansion(mult = c(0, 0.05)),
+      breaks = function(x) { b <- pretty(x); b[b %% 1 == 0] }
+    ) + 
+    scale_y_continuous(
+      limits = c(0, NA), 
+      expand = expansion(mult = c(0, 0.15)),
+      breaks = function(x) { b <- pretty(x); b[b %% 1 == 0] }
+    ) +
+    
     labs(
       title = plot_title,
       x = x_axis_lab,
       y = y_axis_lab
     ) +
     theme_mee() +
-    guides(color = guide_legend(override.aes = list(alpha = 1, size = 6, shape = 16, fill = NA)))
+    guides(color = guide_legend(override.aes = list(alpha = 1, size = 9, shape = 16, fill = NA)))
   
   return(p)
 }
@@ -483,10 +484,10 @@ for (lt in list_types) {
     th_col_str <- sub("^0", "", th)
     
     # Dynamically build variables specific to this combination
-    er_col_perch <- paste0("perchV2>", th_col_str, "_", lt)
+    er_col_perchV2 <- paste0("perchV2>", th_col_str, "_", lt)
     
     list_label <- ifelse(lt == "region", "region list", "all species")
-    perch_label <- paste0("Perch conf >", th, " (", list_label, ")")
+    perchV2_label <- paste0("Perch v2.0 conf >", th, " (", list_label, ")")
     
     cat(sprintf("\n--- Processing Threshold: %s | List: %s ---\n", th, lt))
     
@@ -498,25 +499,27 @@ for (lt in list_types) {
       cat("  > Generating:", scale, "\n")
       
       all_plots_model_split[[scale]] <- create_model_comparison_plot(
-                                            scale_name = scale,
-                                            data = df_final,
-                                            er_col_perch = er_col_perch,
-                                            perch_label = perch_label,
-                                            show_y_label = TRUE, 
-                                            show_x_label = is_last_row)
+                                              scale_name = scale,
+                                              data = df_final,
+                                              er_col_perchV2 = er_col_perchV2,
+                                              perchV2_label = perchV2_label,
+                                              show_y_label = TRUE, 
+                                              show_x_label = is_last_row)
     }
     
     valid_model_plots <- all_plots_model_split[!sapply(all_plots_model_split, is.null)]
     
     if (length(valid_model_plots) > 0) {
       cat("  > Assembling layout...\n")
-      # Adjusted height down from 18 to 15 since we removed a row
+      
       p_model_grid <- wrap_plots(valid_model_plots, ncol = 1, nrow = length(plot_scales)) +
         plot_layout(guides = "collect") &
         theme(legend.position = "bottom")
       
-      output_path <- paste0(output_dir, "SR_vs_ER_Combined_Only_Model_Split_", lt, "_", th_col_str, ".png")
-      ggsave(output_path, p_model_grid, width = 10, height = 15, dpi = 300)
+      output_path <- paste0(output_dir, "SR_vs_ER_Combined_Only_Model_Split_", lt, "_", th_col_str, "_v2.png")
+      
+      # Height is set to 15 to fit the 4 rows
+      ggsave(output_path, p_model_grid, width = 10, height = 15, dpi = 300) # Adjusted width slightly for 2 cols
       cat("  > Done! Saved to:", output_path, "\n")
     }
   }
@@ -2280,4 +2283,6 @@ if (length(plots_list) > 0) {
   cat("Saved Combined Plot PNG to", output_path, "\n")
 }
 ```
+
+
 
