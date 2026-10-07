@@ -1,9 +1,8 @@
 # clustering_species_richness
 
 
-Scripts used for the analysis pipeline in [name of paper about source separation and clustering estimating species richness]
-
-for now, i don't include the slurm (.sh) files to excute these python scripts in the HPC, as these settings will vary depending on your local cluster. But available upon request
+Scripts and data used for the analysis pipeline in the 2026 MEE submission "Unsupervised source separation and clustering of soundscape recordings predicts avian richness in hyperdiverse systems".
+For now, the slurm (.sh) files to execute these python scripts in a HPC are not included, as these settings will vary depending on your local cluster, but they are available upon request.
 
 
 The order these scripts are run:
@@ -37,3 +36,4 @@ The order these scripts are run:
 14: cluster_paper_plots.rmd
 
 
+The data (SR, cluster counts, index values, Perch SR, etc, for each recording/site/etc) is saved as "data.csv". 
