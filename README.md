@@ -33,9 +33,9 @@ The order these scripts are run:
 
 13: perch_sr_counter.py
 
-15: flowchart_image_gen.py
+14: flowchart_image_gen.py
 
-16: figs.rmd
+15: figs.rmd
 
 
 The data (SR, cluster counts, index values, Perch SR, etc, for each recording/site/etc) is saved as "data.csv". 
