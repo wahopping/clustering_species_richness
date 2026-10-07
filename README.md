@@ -27,13 +27,15 @@ The order these scripts are run:
 
 10: perch_classification.py
 
-11: perch_sr_counter.py
+11: perch_v1_v2_calibration.py
 
-12: index_calculator.py
+13: perch_sr_counter.py
 
-13: flowchart_image_gen.py
+14: index_calculator.py
 
-14: figs.rmd
+15: flowchart_image_gen.py
+
+16: figs.rmd
 
 
 The data (SR, cluster counts, index values, Perch SR, etc, for each recording/site/etc) is saved as "data.csv". 
