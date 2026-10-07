@@ -29,7 +29,7 @@ The order these scripts are run:
 
 11: perch_v1_v2_calibration.py
 
-12: perch_SR_counter.py
+12: perch_sr_counter.py
 
 12: index_calculator.py
 
