@@ -33,7 +33,7 @@ The order these scripts are run:
 
 13: flowchart_image_gen.py
 
-14: cluster_paper_plots.rmd
+14: figs.rmd
 
 
 The data (SR, cluster counts, index values, Perch SR, etc, for each recording/site/etc) is saved as "data.csv". 
