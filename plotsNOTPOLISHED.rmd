@@ -14,8 +14,8 @@ library(ggrepel)
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
-output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+input_file <- "[path to data.csv]"
+output_dir <- "[output path for figures]"
 
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
@@ -252,242 +252,9 @@ output_path <- paste0(output_dir, "figure2_2.png")
 ggsave(output_path, p, width = 10, height = 9, dpi = 300)
 cat("Done! Saved plot to:", output_path, "\n")
 ```
-Fig 3: bootstrapped RMSE
-```{r}
-library(ggplot2)
-library(dplyr)
-library(tidyr)
-library(stringr)
 
-# ==========================================
-# 1. CONFIGURATION
-# ==========================================
-input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
-output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
 
-if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
-
-target_scales <- c(
-  "15_Second_Interval" = "15-Second Resolution",
-  "1_Minute_Interval"  = "1-Minute Resolution",
-  "15_Minute_Interval" = "15-Minute Resolution",
-  "Macro"              = "Macro (~1 Hour) Resolution"
-)
-
-base_datasets <- c("PER", "STM_h", "STM_s_HTR", "STM_s_LTR")
-
-# 30 Metrics (Source Separation excluded)
-metrics_list <- c(
-  "hier_euc_t0.7_br_noise_removed", "hier_euc_t0.7_fr_noise_removed", "hier_euc_t0.7_fr_all_channels",
-  "hier_euc_t0.7_br_all_channels",
-  "perchV2>.1_all", "perchV2>.1_region", "perchV2>.3_all", "perchV2>.3_region", 
-  "perchV2>.5_all", "perchV2>.5_region", "perchV2>.7_all", "perchV2>.7_region", 
-  "perchV2>.9_all", "perchV2>.9_region",
-  "br_ACI", "br_BI", "br_surface_roughness", "br_spectral_snr", 
-  "br_ACTspfract_avg", "br_EVNspCount_sum", "br_EVNspFract_avg", "br_ROIcover",
-  "fr_ACI", "fr_BI", "fr_surface_roughness", "fr_spectral_snr", 
-  "fr_ACTspfract_avg", "fr_EVNspCount_sum", "fr_EVNspFract_avg", "fr_ROIcover"
-)
-
-# Updated theme for facet_wrap with MUCH larger legends and clear headers
-theme_mee_dotplot <- function() {
-  theme_classic(base_size = 14) +
-    theme(
-      axis.text.y = element_text(color = "black", size = 11),
-      axis.text.x = element_text(color = "black", size = 12),
-      axis.line = element_line(color = "black", linewidth = 0.5),
-      axis.ticks = element_line(color = "black"),
-      axis.title = element_text(face = "bold", size = 16),
-      
-      # FACET HEADERS
-      strip.background = element_rect(fill = "#F5F5F5", color = "black", linewidth = 1),
-      strip.text = element_text(face = "bold", size = 16, margin = margin(t = 8, b = 8)),
-      panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
-      
-      # MASSIVE LEGEND
-      legend.position = "bottom",
-      legend.title = element_text(face = "bold", size = 20),       
-      legend.text = element_text(size = 18),                       
-      legend.key.width = unit(2.5, "cm"),
-      legend.key.height = unit(1.5, "cm"),
-      legend.spacing.x = unit(0.5, "cm"),
-      legend.box.margin = margin(t = 20, b = 10),
-      
-      panel.grid.major.x = element_line(color = "gray85", linetype = "dashed", linewidth = 0.8), 
-      panel.grid.minor = element_blank(),
-      panel.grid.major.y = element_blank()
-    )
-}
-
-clean_metric_name <- function(raw_name) {
-  if (raw_name == "hier_euc_t0.7_br_noise_removed") return("[BR, noise removed] Hierarchical Clustering")
-  if (raw_name == "hier_euc_t0.7_fr_noise_removed") return("[FR, noise removed] Hierarchical Clustering")
-  if (raw_name == "hier_euc_t0.7_br_all_channels") return("[BR, all channels] Hierarchical Clustering")
-  if (raw_name == "hier_euc_t0.7_fr_all_channels") return("[FR, all channels] Hierarchical Clustering")
-  
-  if (grepl("perch", raw_name)) {
-    clean <- gsub("perchV[12]>", "Perch (Conf > ", raw_name)
-    clean <- gsub("_all", " All)", clean)
-    clean <- gsub("_region", " Region)", clean)
-    return(clean)
-  }
-  
-  if (grepl("^br_", raw_name) || grepl("^fr_", raw_name)) {
-    prefix <- ifelse(grepl("^br_", raw_name), "[BR] ", "[FR] ")
-    core <- gsub("^[bf]r_", "", raw_name)
-    core <- gsub("_avg", " (Avg)", core)
-    core <- gsub("_sum", " (Sum)", core)
-    core <- gsub("surface_roughness", "Surface Roughness", core)
-    core <- gsub("spectral_snr", "Spectral SNR", core)
-    return(paste0(prefix, core))
-  }
-  return(raw_name)
-}
-
-# ==========================================
-# 2. LOAD DATA & SYNC MACRO LOGIC
-# ==========================================
-cat("Loading and processing master dataset...\n")
-df <- read.csv(input_file, stringsAsFactors = FALSE, check.names = FALSE)
-df <- df %>% mutate(across(all_of(intersect(metrics_list, colnames(df))), ~as.numeric(na_if(as.character(.), ""))))
-
-df_filtered <- df %>%
-  filter(Dataset %in% base_datasets) %>%
-  mutate(Region = ifelse(grepl("PER", Dataset), "PER", "STM"))
-
-base_effort <- df %>%
-  filter(
-    (Dataset %in% c("PER", "STM_h", "STM_s_HTR") & Summary_Level == "15_Second_Interval") |
-    (Dataset == "STM_s_LTR" & Summary_Level == "15_Minute_Interval")
-  ) %>%
-  mutate(
-    Minute_Value = ifelse(Summary_Level == "15_Second_Interval", 0.25, 15),
-    Target_Site_Date = sub("_[^_]+$", "", Grouping),
-    Target_Site = sub("_[^_]+_[^_]+$", "", Grouping)
-  )
-
-effort_combined <- bind_rows(
-  base_effort %>% group_by(Dataset, Grouping = Target_Site_Date) %>% summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>% mutate(Summary_Level = "Site_Date"),
-  base_effort %>% group_by(Dataset, Grouping = Target_Site) %>% summarize(Effort_Minutes = sum(Minute_Value, na.rm = TRUE), .groups = "drop") %>% mutate(Summary_Level = "Site")
-)
-
-df_final <- df_filtered %>%
-  left_join(effort_combined, by = c("Dataset", "Summary_Level", "Grouping")) %>%
-  mutate(Effort_Minutes = replace_na(Effort_Minutes, 1)) %>%
-  filter(
-    Summary_Level %in% c("15_Second_Interval", "1_Minute_Interval", "15_Minute_Interval") |
-    (Region == "STM" & Summary_Level == "Site") |
-    (Region == "PER" & Summary_Level == "Site_Date")
-  ) %>%
-  mutate(Summary_Level = ifelse(Summary_Level %in% c("Site", "Site_Date"), "Macro", Summary_Level))
-
-# ==========================================
-# 3. BOOTSTRAPPING TO A SINGLE DATAFRAME
-# ==========================================
-cat("Bootstrapping RMSE for all scales...\n")
-all_results_list <- list()
-dynamic_scale_titles <- c() # To keep track of our new titles for factor ordering
-
-for (scale in names(target_scales)) {
-  base_scale_title <- target_scales[[scale]]
-  df_sub <- df_final %>% filter(Summary_Level == scale)
-  if (nrow(df_sub) == 0) next
-  
-  # Calculate mean SR formatted to exactly 1 decimal place
-  mean_sr <- sprintf("%.1f", mean(df_sub$SR, na.rm = TRUE))
-  scale_title <- sprintf("%s\n(Mean SR: %s)", base_scale_title, mean_sr)
-  dynamic_scale_titles <- c(dynamic_scale_titles, scale_title)
-  
-  for (metric in metrics_list) {
-    if (!metric %in% colnames(df_sub)) next
-    
-    df_mod <- df_sub %>% dplyr::select(SR, Metric_Val = all_of(metric), Effort_Minutes) %>% drop_na()
-    if (nrow(df_mod) < 3) next
-    
-    boot_res <- replicate(500, {
-      idx <- sample(seq_len(nrow(df_mod)), replace = TRUE)
-      d <- df_mod[idx, ]
-      mod <- lm(SR ~ Metric_Val, data = d, weights = Effort_Minutes)
-      sqrt(sum(d$Effort_Minutes * residuals(mod)^2) / sum(d$Effort_Minutes))
-    })
-    
-    category <- "Traditional Acoustic Index"
-    if (grepl("hier", metric)) category <- "Source-clustering"
-    if (grepl("perch", metric)) category <- "Perch Classifier"
-    
-    all_results_list[[paste(scale, metric)]] <- data.frame(
-      Scale_ID = scale,
-      Scale_Title = scale_title,
-      Raw_Name = metric, 
-      Clean_Name = clean_metric_name(metric),
-      Category = category, 
-      Mean_RMSE = mean(boot_res),
-      Lower_CI = quantile(boot_res, 0.025),
-      Upper_CI = quantile(boot_res, 0.975)
-    )
-  }
-}
-
-# ==========================================
-# 4. DATA SORTING & PLOTTING (FACET_WRAP)
-# ==========================================
-legend_categories <- c("Perch Classifier", "Source-clustering", "Traditional Acoustic Index")
-
-all_results_df <- bind_rows(all_results_list) %>%
-  # 1. Lock in the order of the facets using our dynamically generated titles
-  mutate(Scale_Title = factor(Scale_Title, levels = dynamic_scale_titles)) %>%
-  
-  # 2. Sort by RMSE descending so the highest RMSE (worst) is at the bottom of the factor list
-  arrange(Scale_Title, desc(Mean_RMSE)) %>%
-  
-  # 3. Create a unique Y-axis label combining Name and Scale to trick facet_wrap into independent sorting
-  mutate(Plot_Label = factor(paste(Clean_Name, Scale_Title, sep = "___"), 
-                             levels = unique(paste(Clean_Name, Scale_Title, sep = "___"))))
-
-cat("Generating unified faceted plot...\n")
-
-p <- ggplot(all_results_df, aes(x = Mean_RMSE, y = Plot_Label, color = Category, shape = Category)) +
-  # Increased line thickness (linewidth = 1.5) and point size (size = 4.5)
-  geom_errorbarh(aes(xmin = Lower_CI, xmax = Upper_CI), height = 0, linewidth = 1.5) +
-  geom_point(size = 4.5) +
-  
-  # REVERSE THE X-AXIS
-  scale_x_reverse() +
-  
-  # Use facet_wrap with free scales to allow the Y-axis to shift independently
-  facet_wrap(~Scale_Title, scales = "free", ncol = 2) +
-  
-  # Strip out the hidden "___Scale" string so the labels look normal on the plot
-  scale_y_discrete(labels = function(x) gsub("___.*$", "", x)) +
-  
-  # Custom requested colors
-  scale_color_manual(
-    values = c("Perch Classifier" = "#CC79A7", 
-               "Source-clustering" = "#0072B2", 
-               "Traditional Acoustic Index" = "#E69F00"),
-    limits = legend_categories
-  ) +
-  scale_shape_manual(
-    values = c("Perch Classifier" = 16, 
-               "Source-clustering" = 17, 
-               "Traditional Acoustic Index" = 15),
-    limits = legend_categories
-  ) +
-  labs(
-    x = "Root Mean Square Error (RMSE) ± 95% CI\n(Numbers reversed so better predictions scale from left to right)", 
-    y = NULL,
-    color = "Methodology", shape = "Methodology"
-  ) +
-  theme_mee_dotplot() +
-  
-  # Override the legend aesthetics to make the lines and points massive in the legend box
-  guides(color = guide_legend(override.aes = list(size = 8, linewidth = 2.5)))
-
-output_path <- paste0(output_dir, "Figure4_Combined_Resolutions_RMSE_DotPlot_Faceted.png")
-ggsave(output_path, p, width = 20, height = 22, dpi = 300)
-cat("Saved Faceted Plot PNG to", output_path, "\n")
-```
- fig 3 version 2 relative RMSE
+fig 3: relative RMSE
  
 ```{r}
 library(ggplot2)
@@ -498,8 +265,8 @@ library(stringr)
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
-output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+input_file <- "[path to data.csv]"
+output_dir <- "[output path for figures]"
 
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
@@ -733,7 +500,7 @@ cat("Saved Faceted Plot PNG to", output_path, "\n")
 
 ```
 
-fig 4. with just perch 2.0:
+fig 4. with just perch 2.0 (for body text):
 ```{r}
 library(ggplot2)
 library(dplyr)
@@ -743,8 +510,8 @@ library(patchwork)
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
-output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+input_file <- "[path to data.csv]"
+output_dir <- "[output path for figures]"
 
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
@@ -1007,7 +774,7 @@ for (lt in list_types) {
 cat("\nAll 10 combinations generated successfully!\n")
 ```
 
-fig 4. versions for supplementals (with perch 1.0 and perch 2.0) 
+10 iterations of fig 4. with all perch settings, including both perch 1.0 and perch 2.0 (for supplementals)
 
 ```{r}
 library(ggplot2)
@@ -1018,8 +785,8 @@ library(patchwork)
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-input_file <- "/Users/Archibald/Documents/PhD/Chapter_1/Clusters/Master_Summary_SR_Cluster_Perch_and_Indices_Macro2.csv"
-output_dir <- "/Users/Archibald/Documents/PhD/Chapter_1/plots/"
+input_file <- "[path to data.csv]"
+output_dir <- "[output path for figures]"
 
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
 
